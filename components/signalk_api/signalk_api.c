@@ -266,6 +266,27 @@ static esp_err_t signalk_disconnect_handler(httpd_req_t *req) {
 }
 
 // ============================================================================
+// POST /api/signalk/clear-token - Clear stored authentication token
+// ============================================================================
+static esp_err_t signalk_clear_token_handler(httpd_req_t *req) {
+    esp_err_t err = signalk_auth_clear_token();
+    
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+    }
+    
+    char *response = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t result = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    free(response);
+    return result;
+}
+
+// ============================================================================
 // POST /api/signalk/test - Test connection
 // ============================================================================
 static esp_err_t signalk_test_handler(httpd_req_t *req) {
@@ -379,6 +400,14 @@ void signalk_api_register(httpd_handle_t server) {
         .handler = signalk_disconnect_handler,
     };
     register_uri_or_log(server, &disconnect_uri, "signalk disconnect");
+
+    // Clear token
+    httpd_uri_t clear_token_uri = {
+        .uri = "/api/signalk/clear-token",
+        .method = HTTP_POST,
+        .handler = signalk_clear_token_handler,
+    };
+    register_uri_or_log(server, &clear_token_uri, "signalk clear token");
 
     // Test
     httpd_uri_t test_uri = {

@@ -40,6 +40,12 @@ esp_err_t signalk_auth_check_request(const char *hostname,
                                       signalk_auth_request_t *request);
 
 /**
+ * @brief Clear stored authentication token
+ * @return ESP_OK on success
+ */
+esp_err_t signalk_auth_clear_token(void);
+
+/**
  * @brief Validate an access token
  * @param hostname Server hostname or IP
  * @param port Server port

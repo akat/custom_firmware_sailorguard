@@ -134,6 +134,25 @@ export default function SignalKView() {
     }
   };
 
+  const clearToken = async () => {
+    try {
+      setErrorMessage("");
+      const response = await fetch("/api/signalk/clear-token", { method: "POST" });
+      const data = await response.json();
+      
+      if (data.success) {
+        setSaveMessage("Token cleared! Reconnect to authenticate again.");
+        setTimeout(() => setSaveMessage(""), 3000);
+        loadConfig();
+        loadStatus();
+      } else {
+        setErrorMessage("Failed to clear token: " + (data.error || "Unknown error"));
+      }
+    } catch (error) {
+      setErrorMessage("Error: " + error.message);
+    }
+  };
+
   return (
     <section class="card">
       <div class="card-header">
@@ -309,6 +328,12 @@ export default function SignalKView() {
           <p class="section-description">
             Authentication is automatic. When enabled, the device will request access
             from the Signal K server and save the token after approval.
+          </p>
+          <button type="button" onClick={clearToken} class="button secondary" style={{ marginTop: "10px" }}>
+            Clear Token
+          </button>
+          <p class="section-description" style={{ fontSize: "0.85em", marginTop: "5px", color: "#666" }}>
+            Use this to restart the authentication process if needed.
           </p>
         </fieldset>
 
