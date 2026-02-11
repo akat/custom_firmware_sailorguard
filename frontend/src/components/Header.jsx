@@ -3,9 +3,9 @@ export default function Header({ view, onNavigate }) {
     <header class="app-header">
       <div class="hero">
         <div>
-          <p class="eyebrow">ESP32 Preact</p>
-          <h1>Device Dashboard</h1>
-          <p class="subtitle">Live system details from the firmware.</p>
+          <p class="eyebrow">SailorGuard</p>
+          <h1>Anchor Guard</h1>
+          <p class="subtitle">administration panel</p>
         </div>
         <div class="status-chip">
           <span class="dot" />

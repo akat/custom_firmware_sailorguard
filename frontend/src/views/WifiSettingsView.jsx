@@ -4,10 +4,15 @@ export default function WifiSettingsView({
   wifiError,
   wifiMessage,
   wifiForm,
+  apForm,
+  apMessage,
+  apError,
   onScan,
   onSubmit,
   onFormChange,
-  onSelectNetwork
+  onSelectNetwork,
+  onApFormChange,
+  onApSubmit
 }) {
   return (
     <section class="card">
@@ -19,6 +24,7 @@ export default function WifiSettingsView({
       </div>
       <div class="wifi-grid">
         <form class="wifi-form" onSubmit={onSubmit}>
+          <h3>Connect to Network</h3>
           <label class="field">
             <span>SSID</span>
             <input
@@ -69,7 +75,9 @@ export default function WifiSettingsView({
           ))}
         </div>
       </div>
+
       <div class="wifi-status">
+        <h3>Status</h3>
         <div class="status-item">
           <span class="label">STA Status</span>
           <span class="value">
@@ -91,6 +99,40 @@ export default function WifiSettingsView({
           </span>
         </div>
       </div>
+
+      <form class="wifi-form ap-form" onSubmit={onApSubmit}>
+        <h3>SoftAP Settings</h3>
+        <p class="hint-text">Configure the Access Point when STA is not connected</p>
+        <label class="field">
+          <span>SoftAP SSID</span>
+          <input
+            class="input"
+            value={apForm.ssid}
+            onInput={(event) => onApFormChange({ ssid: event.target.value })}
+            placeholder="Access point name"
+            required
+            maxLength="32"
+          />
+        </label>
+        <label class="field">
+          <span>SoftAP Password</span>
+          <input
+            class="input"
+            type="password"
+            value={apForm.password}
+            onInput={(event) => onApFormChange({ password: event.target.value })}
+            placeholder="At least 8 characters"
+            required
+            minLength="8"
+            maxLength="64"
+          />
+        </label>
+        <button class="button primary" type="submit">
+          Update SoftAP
+        </button>
+        {apMessage && <p class="message">{apMessage}</p>}
+        {apError && <p class="error">{apError}</p>}
+      </form>
     </section>
   );
 }

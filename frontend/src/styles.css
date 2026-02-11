@@ -154,6 +154,23 @@ h1 {
   gap: 14px;
 }
 
+.ap-form {
+  margin-top: 32px;
+  padding-top: 28px;
+  border-top: 1px solid #e1ddd6;
+}
+
+.ap-form h3 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+}
+
+.hint-text {
+  margin: 0 0 14px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -270,6 +287,12 @@ h1 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 16px;
+}
+
+.wifi-status h3 {
+  grid-column: 1 / -1;
+  margin: 0 0 8px 0;
+  font-size: 18px;
 }
 
 .status-item {

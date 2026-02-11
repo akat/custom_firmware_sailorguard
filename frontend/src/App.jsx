@@ -14,6 +14,9 @@ export default function App() {
   const [wifiError, setWifiError] = useState("");
   const [wifiMessage, setWifiMessage] = useState("");
   const [wifiForm, setWifiForm] = useState({ ssid: "", password: "" });
+  const [apForm, setApForm] = useState({ ssid: "", password: "" });
+  const [apError, setApError] = useState("");
+  const [apMessage, setApMessage] = useState("");
 
   useEffect(() => {
     let timerId = null;
@@ -71,8 +74,22 @@ export default function App() {
       }
     };
 
+    const loadApConfig = async () => {
+      try {
+        const response = await fetch("/api/wifi/ap_config", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        setApForm({ ssid: data.ssid || "", password: data.password || "" });
+      } catch (err) {
+        setApError(err.message || "Failed to fetch SoftAP config");
+      }
+    };
+
     loadStatus();
     loadConfig();
+    loadApConfig();
     timerId = setInterval(loadStatus, 3000);
 
     return () => {
@@ -138,6 +155,39 @@ export default function App() {
     setWifiForm((prev) => ({ ...prev, ...patch }));
   };
 
+  const updateApForm = (patch) => {
+    setApForm((prev) => ({ ...prev, ...patch }));
+  };
+
+  const submitApConfig = async (event) => {
+    event.preventDefault();
+    setApMessage("Updating SoftAP...");
+    setApError("");
+
+    try {
+      const response = await fetch("/api/wifi/ap_config", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          ssid: apForm.ssid,
+          password: apForm.password
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      setApMessage("SoftAP settings updated successfully");
+      setTimeout(() => setApMessage(""), 3000);
+    } catch (err) {
+      setApMessage("");
+      setApError(err.message || "Failed to update SoftAP settings");
+    }
+  };
+
   const handleNavigate = (nextView) => {
     setRoute(nextView);
     setView(nextView);
@@ -153,10 +203,15 @@ export default function App() {
           wifiError={wifiError}
           wifiMessage={wifiMessage}
           wifiForm={wifiForm}
+          apForm={apForm}
+          apMessage={apMessage}
+          apError={apError}
           onScan={scanNetworks}
           onSubmit={submitWifi}
           onFormChange={updateWifiForm}
           onSelectNetwork={(ssid) => updateWifiForm({ ssid })}
+          onApFormChange={updateApForm}
+          onApSubmit={submitApConfig}
         />
       )}
     </MainLayout>
