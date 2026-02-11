@@ -102,7 +102,7 @@ export default function WifiSettingsView({
 
       <form class="wifi-form ap-form" onSubmit={onApSubmit}>
         <h3>SoftAP Settings</h3>
-        <p class="hint-text">Configure the Access Point when STA is not connected</p>
+        <p class="hint-text">Configure the Access Point.</p>
         <label class="field">
           <span>SoftAP SSID</span>
           <input

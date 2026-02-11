@@ -6,6 +6,7 @@
 
 #include "status_api.h"
 #include "wifi_api.h"
+#include "config_api.h"
 
 static const char *TAG = "http_server";
 
@@ -93,6 +94,7 @@ httpd_handle_t start_http_server(const char *base_path, esp_netif_t *ap_netif) {
 
     status_api_register(server, ap_netif);
     wifi_api_register(server);
+    config_api_register(server);
 
     static static_ctx_t ctx = {0};
     ctx.base_path = base_path;

@@ -154,6 +154,42 @@ h1 {
   gap: 14px;
 }
 
+.config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.toggle-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.field-help {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--accent) 50%),
+    linear-gradient(135deg, var(--accent) 50%, transparent 50%);
+  background-position: calc(100% - 18px) calc(50% + 2px),
+    calc(100% - 12px) calc(50% + 2px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+  padding-right: 36px;
+}
+
 .ap-form {
   margin-top: 32px;
   padding-top: 28px;
@@ -332,6 +368,32 @@ h1 {
 
 .loading {
   color: var(--muted);
+}
+
+.config-section {
+  border: 1px solid #e1ddd6;
+  border-radius: 18px;
+  padding: 16px;
+  margin-top: 8px;
+  background: #f9f8f3;
+}
+
+.config-section legend {
+  margin: 0 0 8px 0;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--ink);
+  padding: 0 8px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.section-description {
+  margin: 0 0 12px 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .footer {

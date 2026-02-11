@@ -25,6 +25,12 @@ export default function Header({ view, onNavigate }) {
         >
           Wi-Fi Settings
         </button>
+        <button
+          class={`menu-button ${view === "config" ? "active" : ""}`}
+          onClick={() => onNavigate("config")}
+        >
+          Configuration
+        </button>
       </nav>
     </header>
   );
