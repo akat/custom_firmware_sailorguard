@@ -59,8 +59,11 @@ static esp_err_t static_file_handler(httpd_req_t *req) {
         return httpd_resp_send_err(req, HTTPD_414_URI_TOO_LONG, "path too long");
     }
 
+    ESP_LOGI(TAG, "GET %s -> %s", req->uri, filepath);
+
     FILE *file = fopen(filepath, "rb");
     if (!file) {
+        ESP_LOGW(TAG, "File not found: %s", filepath);
         return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
     }
 
@@ -83,7 +86,7 @@ static esp_err_t static_file_handler(httpd_req_t *req) {
 
 httpd_handle_t start_http_server(const char *base_path, esp_netif_t *ap_netif) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 32;  // Increased to accommodate all API handlers + static
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 6144;
 
@@ -97,6 +100,10 @@ httpd_handle_t start_http_server(const char *base_path, esp_netif_t *ap_netif) {
     wifi_api_register(server);
     config_api_register(server);
 
+    return server;
+}
+
+void http_server_register_static(httpd_handle_t server, const char *base_path) {
     static static_ctx_t ctx = {0};
     ctx.base_path = base_path;
 
@@ -110,6 +117,4 @@ httpd_handle_t start_http_server(const char *base_path, esp_netif_t *ap_netif) {
     if (httpd_register_uri_handler(server, &file_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register file handler");
     }
-
-    return server;
 }

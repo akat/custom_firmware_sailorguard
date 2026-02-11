@@ -6,6 +6,8 @@
 #include "http_server.h"
 #include "spiffs_store.h"
 #include "wifi_manager.h"
+#include "signalk_client.h"
+#include "signalk_api.h"
 
 static const char *TAG = "app";
 
@@ -23,7 +25,17 @@ void app_main(void) {
 	wifi_manager_init("ESP32-DASH", "esp32pass", 15000);
 	wifi_manager_start();
 	spiffs_init("/spiffs", "spiffs");
-	start_http_server("/spiffs", wifi_manager_get_ap_netif());
+	
+	// Get HTTP server handle
+	httpd_handle_t server = start_http_server("/spiffs", wifi_manager_get_ap_netif());
+	
+	// Initialize and register SignalK components (before static file handler)
+	signalk_client_init();
+	signalk_api_register(server);
+	signalk_client_start();
+	
+	// Register static file handler AFTER all API handlers
+	http_server_register_static(server, "/spiffs");
 
 	ESP_LOGI(TAG, "Open http://192.168.4.1/ after connecting to ESP32-DASH");
 }

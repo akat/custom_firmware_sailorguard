@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import DashboardView from "./views/DashboardView.jsx";
 import WifiSettingsView from "./views/WifiSettingsView.jsx";
 import ConfigView from "./views/ConfigView.jsx";
+import SignalKView from "./views/SignalKView.jsx";
 import MainLayout from "./templates/MainLayout.jsx";
 import { getRoute, setRoute, subscribeRouteChange } from "./utils/router.js";
 
@@ -293,6 +294,9 @@ export default function App() {
           onChange={updateConfigValue}
           onSubmit={submitConfig}
         />
+      )}
+      {view === "signalk" && (
+        <SignalKView />
       )}
     </MainLayout>
   );

@@ -1,4 +1,4 @@
-const routes = new Set(["dashboard", "wifi", "config"]);
+const routes = new Set(["dashboard", "wifi", "config", "signalk"]);
 
 export function getRoute() {
   const raw = window.location.hash.replace("#", "");

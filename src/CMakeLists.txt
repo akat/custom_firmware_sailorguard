@@ -5,5 +5,5 @@ FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
 
 idf_component_register(
 	SRCS ${app_sources}
-	REQUIRES http_server spiffs_store wifi_manager wifi_api
+	REQUIRES http_server spiffs_store wifi_manager wifi_api config_api signalk_client signalk_api
 )

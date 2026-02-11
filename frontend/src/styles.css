@@ -162,13 +162,28 @@ h1 {
 }
 
 .toggle-row {
+  display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-start;
+  gap: 10px;
   text-transform: none;
   letter-spacing: normal;
   font-size: 15px;
   color: var(--ink);
+}
+
+.toggle-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.toggle-row span {
+  cursor: pointer;
+  user-select: none;
 }
 
 .field-help {
@@ -216,6 +231,30 @@ h1 {
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.12em;
+}
+
+.field.toggle-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.field.toggle-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.field.toggle-row span {
+  cursor: pointer;
+  user-select: none;
 }
 
 .input {
@@ -379,13 +418,26 @@ h1 {
 }
 
 .config-section legend {
-  margin: 0 0 8px 0;
+  margin: 0 0 16px 0;
   font-weight: 600;
   font-size: 15px;
   color: var(--ink);
   padding: 0 8px;
   text-transform: none;
   letter-spacing: normal;
+}
+
+.config-section .field {
+  margin-top: 12px;
+}
+
+.config-section .field:first-child {
+  margin-top: 0;
+}
+
+.config-section .field.toggle-row {
+  margin-top: 4px;
+  margin-bottom: 6px;
 }
 
 .section-description {
