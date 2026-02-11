@@ -8,6 +8,7 @@
 #include "freertos/queue.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 #if __has_include("esp_websocket_client.h")
 #include "esp_websocket_client.h"
@@ -173,6 +174,15 @@ static void signalk_ws_event_handler(void *handler_args,
 }
 
 static esp_err_t signalk_ws_start(void) {
+#if SIGNALK_WS_AVAILABLE == 0
+    ESP_LOGW(TAG, "WebSocket client not available - esp_websocket_client.h not found");
+    g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+    snprintf(g_signalk_state.status.error_message,
+             sizeof(g_signalk_state.status.error_message),
+             "WebSocket component not available");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+
     const char *scheme = g_signalk_state.config.use_ssl ? "wss" : "ws";
     snprintf(g_signalk_state.ws_url, sizeof(g_signalk_state.ws_url),
              "%s://%s:%d/signalk/v1/stream",
@@ -202,8 +212,11 @@ static esp_err_t signalk_ws_start(void) {
         .disable_auto_reconnect = true
     };
 
+    ESP_LOGI(TAG, "Starting WebSocket connection to %s", g_signalk_state.ws_url);
+    
     g_signalk_state.ws_client = esp_websocket_client_init(&cfg);
     if (!g_signalk_state.ws_client) {
+        ESP_LOGE(TAG, "Failed to initialize WebSocket client");
         return ESP_ERR_NO_MEM;
     }
 
@@ -320,10 +333,14 @@ static void signalk_client_task(void *pvParameters) {
                         now_ms >= g_signalk_state.next_reconnect_ms) {
                         esp_err_t err = signalk_ws_start();
                         if (err != ESP_OK) {
-                            snprintf(g_signalk_state.status.error_message,
-                                     sizeof(g_signalk_state.status.error_message),
-                                     "WebSocket connect failed");
-                            signalk_ws_schedule_reconnect(now_ms);
+                            if (err == ESP_ERR_NOT_SUPPORTED) {
+                                ESP_LOGI(TAG, "WebSocket streaming disabled - component not available");
+                                // Don't retry if WebSocket is not supported
+                                g_signalk_state.next_reconnect_ms = INT64_MAX;
+                            } else {
+                                ESP_LOGW(TAG, "WebSocket connection failed: %s", esp_err_to_name(err));
+                                signalk_ws_schedule_reconnect(now_ms);
+                            }
                         } else {
                             signalk_ws_reset_reconnect();
                         }
