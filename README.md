@@ -2,6 +2,13 @@
 
 This project serves a web dashboard from an ESP32-S3 using SPIFFS and an HTTP server. The UI is built with Preact and served as static files from the device's flash memory.
 
+## 📚 Documentation
+
+- **[README.md](README.md)** (this file) - Quick start and user guide
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture and development patterns
+- **[LLM_GUIDE.md](LLM_GUIDE.md)** - Quick reference for LLMs and developers
+- **[config/README.md](config/README.md)** - Configuration system documentation
+
 ## Features
 
 - **WiFi Management**
@@ -24,6 +31,8 @@ This project serves a web dashboard from an ESP32-S3 using SPIFFS and an HTTP se
   - `/api/wifi/scan` - Scan available networks
   - `/api/wifi/config` - Get/set WiFi credentials
   - `/api/wifi/ap_config` - Get/set SoftAP SSID and password
+  - `/api/config/schema` - Get configuration UI schema
+  - `/api/config/values` - Get/set device configuration values
 
 ## Project Structure
 
@@ -34,8 +43,11 @@ This project serves a web dashboard from an ESP32-S3 using SPIFFS and an HTTP se
 │   ├── wifi_manager/       # WiFi connection & SoftAP management
 │   ├── wifi_api/           # WiFi REST API endpoints
 │   ├── status_api/         # Status API endpoint
+│   ├── config_api/         # Device configuration API & helpers
 │   ├── http_server/        # HTTP server & static file serving
 │   └── spiffs_store/       # SPIFFS mount utilities
+├── config/                 # Device configuration schema
+│   └── config.json         # Configuration UI schema (source)
 ├── frontend/               # Preact dashboard source code
 │   ├── src/
 │   ├── package.json
@@ -68,6 +80,7 @@ This process:
 - Installs Preact and build dependencies
 - Compiles the Preact UI with Vite
 - Outputs to `frontend/dist/`
+- Copies `config/config.json` to `data/` directory
 - Copies build artifacts to `data/` directory (which will be embedded in SPIFFS)
 
 ### 2. Build the Firmware
@@ -202,6 +215,77 @@ Changes take effect immediately and are persisted to device storage.
 4. **Connection timeout** → After 15 seconds, activates SoftAP fallback
 
 This ensures invalid network credentials never get permanently stored.
+
+## Device Configuration System
+
+### Configuration Schema
+
+The device configuration UI is defined by [config/config.json](config/config.json). This file defines:
+- Configuration sections and field groupings
+- Field types (number, bool, text, select, gpio)
+- Default values, min/max ranges, validation rules
+- Help text and labels for the UI
+
+When you build the frontend (`npm run build:esp`), this file is automatically copied to `data/config.json` and uploaded to SPIFFS.
+
+### Modifying Configuration Schema
+
+1. Edit [config/config.json](config/config.json) to add/modify configuration fields
+2. Rebuild frontend: `cd frontend && npm run build:esp`
+3. Upload to device: `pio run -t uploadfs`
+
+Example field definition:
+```json
+{
+  "key": "my_gpio",
+  "label": "My GPIO Pin",
+  "type": "gpio",
+  "default": 5,
+  "min": 0,
+  "max": 39,
+  "help": "GPIO pin for custom feature"
+}
+```
+
+### Using Config Values in Firmware
+
+To read configuration values from your firmware components, include the config_api header:
+
+```c
+#include "config_api.h"
+
+void my_component_init(void) {
+    // Get integer/GPIO values
+    int gpio_pin = config_get_int_or_default("anchor_gpio", 4);
+    int interval = config_get_int_or_default("report_interval", 30);
+    
+    // Get boolean values
+    bool buzzer_on = config_get_bool_or_default("buzzer_enabled", true);
+    
+    // Get string values
+    char device_name[64];
+    if (config_get_string("device_label", device_name, sizeof(device_name)) == ESP_OK) {
+        ESP_LOGI(TAG, "Device: %s", device_name);
+    }
+    
+    // Or check if value exists
+    int value;
+    if (config_get_int("some_key", &value) == ESP_OK) {
+        // Value was found
+    } else {
+        // Value not set, use default
+    }
+}
+```
+
+**Available Functions:**
+- `config_get_int(key, *out)` - Returns `ESP_OK` if found
+- `config_get_bool(key, *out)` - Returns `ESP_OK` if found
+- `config_get_string(key, *out, max_len)` - Returns `ESP_OK` if found
+- `config_get_int_or_default(key, default)` - Returns value or default
+- `config_get_bool_or_default(key, default)` - Returns value or default
+
+Configuration values are stored persistently in NVS (Non-Volatile Storage) and survive device reboots.
 
 ## API References
 

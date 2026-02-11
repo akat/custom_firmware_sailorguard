@@ -7,6 +7,7 @@ const __dirname = path.dirname(__filename);
 
 const distDir = path.resolve(__dirname, "..", "dist");
 const dataDir = path.resolve(__dirname, "..", "..", "data");
+const configDir = path.resolve(__dirname, "..", "..", "config");
 
 async function copyDir(src, dest) {
   await fs.mkdir(dest, { recursive: true });
@@ -25,9 +26,19 @@ async function copyDir(src, dest) {
 }
 
 async function main() {
+  // Clean data directory
   await fs.rm(dataDir, { recursive: true, force: true });
+  await fs.mkdir(dataDir, { recursive: true });
+
+  // Copy config.json from config/ directory
+  const configSrc = path.join(configDir, "config.json");
+  const configDest = path.join(dataDir, "config.json");
+  await fs.copyFile(configSrc, configDest);
+  console.log(`Copied config.json from ${configDir} -> ${dataDir}`);
+
+  // Copy frontend build artifacts
   await copyDir(distDir, dataDir);
-  console.log(`Copied ${distDir} -> ${dataDir}`);
+  console.log(`Copied frontend from ${distDir} -> ${dataDir}`);
 }
 
 main().catch((err) => {

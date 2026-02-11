@@ -363,3 +363,64 @@ void config_api_register(httpd_handle_t server) {
     };
     httpd_register_uri_handler(server, &values_post_uri);
 }
+
+// ============================================================================
+// Public API functions for accessing config values from other components
+// ============================================================================
+
+esp_err_t config_get_int(const char *key, int *out_value) {
+    if (!key || !out_value) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char buffer[32] = {0};
+    if (!nvs_get_value_str(key, buffer, sizeof(buffer))) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    *out_value = (int)strtol(buffer, NULL, 10);
+    return ESP_OK;
+}
+
+esp_err_t config_get_bool(const char *key, bool *out_value) {
+    if (!key || !out_value) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char buffer[16] = {0};
+    if (!nvs_get_value_str(key, buffer, sizeof(buffer))) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    *out_value = (strcmp(buffer, "1") == 0 || strcasecmp(buffer, "true") == 0);
+    return ESP_OK;
+}
+
+esp_err_t config_get_string(const char *key, char *out_value, size_t max_len) {
+    if (!key || !out_value || max_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!nvs_get_value_str(key, out_value, max_len)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    return ESP_OK;
+}
+
+int config_get_int_or_default(const char *key, int default_value) {
+    int value;
+    if (config_get_int(key, &value) == ESP_OK) {
+        return value;
+    }
+    return default_value;
+}
+
+bool config_get_bool_or_default(const char *key, bool default_value) {
+    bool value;
+    if (config_get_bool(key, &value) == ESP_OK) {
+        return value;
+    }
+    return default_value;
+}
+
