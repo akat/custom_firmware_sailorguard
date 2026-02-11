@@ -190,7 +190,9 @@ void wifi_manager_init(const char *ap_ssid, const char *ap_password, uint32_t ap
 }
 
 void wifi_manager_start(void) {
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    // Keep SoftAP visible even when STA is connected.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    start_ap();
     ESP_ERROR_CHECK(esp_wifi_start());
 
     char ssid[33] = {0};
@@ -201,8 +203,6 @@ void wifi_manager_start(void) {
     if (ssid[0] != '\0') {
         wifi_manager_connect(ssid, pass, false);
         schedule_ap_fallback();
-    } else {
-        start_ap();
     }
 }
 
