@@ -3,6 +3,8 @@
 #include "signalk_mdns.h"
 #include "signalk_auth.h"
 #include "esp_log.h"
+#include "esp_http_client.h"
+#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -16,7 +18,6 @@
 #else
 #include "esp_err.h"
 typedef void *esp_websocket_client_handle_t;
-typedef void *esp_event_base_t;
 typedef struct {
     const char *uri;
     const char *headers;
@@ -499,16 +500,96 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!g_signalk_state.ws_connected) {
-        ESP_LOGW(TAG, "Not connected, cannot send data");
+    // Check if authenticated
+    if (!g_signalk_state.status.authenticated || g_signalk_state.config.token[0] == '\0') {
+        ESP_LOGW(TAG, "Not authenticated, cannot send data");
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Queueing data for path: %s", data->path);
-    g_signalk_state.status.messages_sent++;
+    // Build value JSON (Signal K HTTP PUT format)
+    cJSON *root = cJSON_CreateObject();
+    
+    // Add value based on type
+    switch (data->type) {
+        case SIGNALK_VALUE_BOOL:
+            cJSON_AddBoolToObject(root, "value", data->value.b);
+            break;
+        case SIGNALK_VALUE_INT:
+            cJSON_AddNumberToObject(root, "value", data->value.i);
+            break;
+        case SIGNALK_VALUE_FLOAT:
+            cJSON_AddNumberToObject(root, "value", data->value.f);
+            break;
+        case SIGNALK_VALUE_STRING:
+            cJSON_AddStringToObject(root, "value", data->value.s);
+            break;
+        case SIGNALK_VALUE_POSITION: {
+            cJSON *pos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pos, "latitude", data->value.pos.latitude);
+            cJSON_AddNumberToObject(pos, "longitude", data->value.pos.longitude);
+            if (data->value.pos.altitude != 0) {
+                cJSON_AddNumberToObject(pos, "altitude", data->value.pos.altitude);
+            }
+            cJSON_AddItemToObject(root, "value", pos);
+            break;
+        }
+        default:
+            cJSON_Delete(root);
+            return ESP_ERR_INVALID_ARG;
+    }
 
-    // Actual payload formatting will be implemented in data phase
-    return ESP_OK;
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    // Build URL with path (convert dots to slashes)
+    const char *scheme = g_signalk_state.config.use_ssl ? "https" : "http";
+    char url[512];
+    char path_buf[200];
+    
+    // Convert path: "environment.outside.temperature" -> "environment/outside/temperature"
+    strncpy(path_buf, data->path, sizeof(path_buf) - 1);
+    path_buf[sizeof(path_buf) - 1] = '\0';
+    for (char *p = path_buf; *p; p++) {
+        if (*p == '.') *p = '/';
+    }
+    
+    snprintf(url, sizeof(url), "%s://%s:%d/signalk/v1/api/vessels/self/%s",
+             scheme, g_signalk_state.config.hostname, g_signalk_state.config.port, path_buf);
+
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .method = HTTP_METHOD_PUT,
+        .timeout_ms = 5000,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        free(payload);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Set headers
+    char auth_header[600];
+    snprintf(auth_header, sizeof(auth_header), "Bearer %.512s", g_signalk_state.config.token);
+    esp_http_client_set_header(client, "Authorization", auth_header);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, payload, strlen(payload));
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+
+    esp_http_client_cleanup(client);
+    free(payload);
+
+    if (err == ESP_OK && status >= 200 && status < 300) {
+        g_signalk_state.status.messages_sent++;
+        ESP_LOGI(TAG, "Data sent to %s (status: %d)", data->path, status);
+        return ESP_OK;
+    } else {
+        ESP_LOGW(TAG, "Failed to send data to %s: %s, status: %d", 
+                 data->path, esp_err_to_name(err), status);
+        return ESP_FAIL;
+    }
 }
 
 esp_err_t signalk_connect(const char *hostname, uint16_t port) {

@@ -153,6 +153,24 @@ export default function SignalKView() {
     }
   };
 
+  const sendTestData = async () => {
+    try {
+      setErrorMessage("");
+      const response = await fetch("/api/signalk/test", { method: "POST" });
+      const data = await response.json();
+      
+      if (data.success) {
+        setSaveMessage("Test data sent successfully!");
+        setTimeout(() => setSaveMessage(""), 3000);
+        loadStatus();
+      } else {
+        setErrorMessage("Failed to send test data");
+      }
+    } catch (error) {
+      setErrorMessage("Error: " + error.message);
+    }
+  };
+
   return (
     <section class="card">
       <div class="card-header">
@@ -334,6 +352,25 @@ export default function SignalKView() {
           </button>
           <p class="section-description" style={{ fontSize: "0.85em", marginTop: "5px", color: "#666" }}>
             Use this to restart the authentication process if needed.
+          </p>
+        </fieldset>
+
+        <fieldset class="config-section">
+          <legend>Data Publishing</legend>
+          <p class="section-description">
+            Send test data to verify the connection is working properly.
+          </p>
+          <button 
+            type="button" 
+            onClick={sendTestData} 
+            class="button primary" 
+            style={{ marginTop: "10px" }}
+            disabled={!status.authenticated}
+          >
+            Send Test Data
+          </button>
+          <p class="section-description" style={{ fontSize: "0.85em", marginTop: "5px", color: "#666" }}>
+            Sends sample temperature, voltage, and switch data to Signal K server.
           </p>
         </fieldset>
 

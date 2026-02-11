@@ -2,6 +2,7 @@
 #include "signalk_client.h"
 #include "signalk_mdns.h"
 #include "signalk_auth.h"
+#include "signalk_publisher.h"
 #include "cJSON.h"
 #include "esp_log.h"
 #include <string.h>
@@ -289,9 +290,53 @@ static esp_err_t signalk_clear_token_handler(httpd_req_t *req) {
 // ============================================================================
 // POST /api/signalk/test - Test connection
 // ============================================================================
+// ============================================================================
+// POST /api/signalk/test - Send test data to SignalK
+// ============================================================================
 static esp_err_t signalk_test_handler(httpd_req_t *req) {
+    // Send some test data to Signal K
+    esp_err_t err1 = signalk_publish_temperature("environment.outside.temperature", 22.5f, "ESP32-Test");
+    esp_err_t err2 = signalk_publish_voltage("electrical.batteries.house.voltage", 12.6f, "ESP32-Test");
+    esp_err_t err3 = signalk_publish_bool("electrical.switches.cabin.state", true, "ESP32-Test");
+    
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "success", 
+                          err1 == ESP_OK || err2 == ESP_OK || err3 == ESP_OK);
+    cJSON_AddStringToObject(root, "message", "Test data sent");
+    
+    cJSON *results = cJSON_CreateArray();
+    cJSON *r1 = cJSON_CreateObject();
+    cJSON_AddStringToObject(r1, "path", "environment.outside.temperature");
+    cJSON_AddStringToObject(r1, "status", esp_err_to_name(err1));
+    cJSON_AddItemToArray(results, r1);
+    
+    cJSON *r2 = cJSON_CreateObject();
+    cJSON_AddStringToObject(r2, "path", "electrical.batteries.house.voltage");
+    cJSON_AddStringToObject(r2, "status", esp_err_to_name(err2));
+    cJSON_AddItemToArray(results, r2);
+    
+    cJSON *r3 = cJSON_CreateObject();
+    cJSON_AddStringToObject(r3, "path", "electrical.switches.cabin.state");
+    cJSON_AddStringToObject(r3, "status", esp_err_to_name(err3));
+    cJSON_AddItemToArray(results, r3);
+    
+    cJSON_AddItemToObject(root, "results", results);
+    
+    char *response = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t result = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    free(response);
+    return result;
+}
+
+// ============================================================================
+// POST /api/signalk/publish - Publish data to SignalK
+// ============================================================================
+static esp_err_t signalk_publish_handler(httpd_req_t *req) {
     size_t total_len = req->content_len;
-    if (total_len == 0 || total_len > 512) {
+    if (total_len == 0 || total_len > 2048) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body size");
     }
 
@@ -313,25 +358,45 @@ static esp_err_t signalk_test_handler(httpd_req_t *req) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
     }
 
-    cJSON *hostname_item = cJSON_GetObjectItem(json, "hostname");
-    cJSON *port_item = cJSON_GetObjectItem(json, "port");
+    cJSON *path_item = cJSON_GetObjectItem(json, "path");
+    cJSON *value_item = cJSON_GetObjectItem(json, "value");
+    cJSON *source_item = cJSON_GetObjectItem(json, "source");
 
-    if (!hostname_item || !cJSON_IsString(hostname_item)) {
+    if (!path_item || !cJSON_IsString(path_item) || !value_item) {
         cJSON_Delete(json);
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing hostname");
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing path or value");
     }
 
-    uint16_t port = 3000;
-    if (port_item && cJSON_IsNumber(port_item)) {
-        port = (uint16_t)port_item->valueint;
+    const char *source = source_item && cJSON_IsString(source_item) ? 
+                        source_item->valuestring : "ESP32";
+
+    esp_err_t err = ESP_FAIL;
+
+    // Determine type and publish
+    if (cJSON_IsBool(value_item)) {
+        err = signalk_publish_bool(path_item->valuestring, 
+                                   cJSON_IsTrue(value_item), source);
+    } else if (cJSON_IsNumber(value_item)) {
+        double val = value_item->valuedouble;
+        if (val == (int)val) {
+            err = signalk_publish_int(path_item->valuestring, (int32_t)val, source);
+        } else {
+            err = signalk_publish_float(path_item->valuestring, (float)val, source);
+        }
+    } else if (cJSON_IsString(value_item)) {
+        err = signalk_publish_string(path_item->valuestring, 
+                                    value_item->valuestring, source);
     }
 
-    // Test in background (stub for now)
-    ESP_LOGI(TAG, "Testing connection to %s:%d", hostname_item->valuestring, port);
     cJSON_Delete(json);
 
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, "{\"ok\":true,\"message\":\"Test in progress\"}", HTTPD_RESP_USE_STRLEN);
+    if (err == ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+    } else {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, 
+                                  "Failed to publish data");
+    }
 }
 
 // ============================================================================
@@ -416,6 +481,14 @@ void signalk_api_register(httpd_handle_t server) {
         .handler = signalk_test_handler,
     };
     register_uri_or_log(server, &test_uri, "signalk test");
+
+    // Publish
+    httpd_uri_t publish_uri = {
+        .uri = "/api/signalk/publish",
+        .method = HTTP_POST,
+        .handler = signalk_publish_handler,
+    };
+    register_uri_or_log(server, &publish_uri, "signalk publish");
 
     ESP_LOGI(TAG, "SignalK API endpoints registered");
 }
