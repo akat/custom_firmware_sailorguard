@@ -83,6 +83,7 @@ static esp_err_t static_file_handler(httpd_req_t *req) {
 
 httpd_handle_t start_http_server(const char *base_path, esp_netif_t *ap_netif) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_uri_handlers = 16;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 6144;
 

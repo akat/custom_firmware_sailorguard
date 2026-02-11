@@ -88,6 +88,11 @@ static cJSON *schema_load_root(void) {
     return root;
 }
 
+// Forward declarations for helper functions
+static const char *default_type(const char *type);
+static cJSON *value_from_string(const char *type, const char *value);
+static bool field_matches_option(cJSON *options, const char *value);
+
 static void add_field_value(cJSON *response, cJSON *field) {
     cJSON *key = cJSON_GetObjectItem(field, "key");
     if (!cJSON_IsString(key)) {
