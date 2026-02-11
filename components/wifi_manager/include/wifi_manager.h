@@ -25,4 +25,7 @@ esp_err_t wifi_manager_scan(wifi_ap_record_t *records, uint16_t *count);
 void wifi_manager_get_status(wifi_status_t *status);
 void wifi_manager_get_saved_ssid(char *ssid, size_t ssid_len);
 
+esp_err_t wifi_manager_get_ap_config(char *ssid, size_t ssid_len, char *password, size_t password_len);
+esp_err_t wifi_manager_set_ap_config(const char *ssid, const char *password);
+
 esp_netif_t *wifi_manager_get_ap_netif(void);

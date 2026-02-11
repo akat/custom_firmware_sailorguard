@@ -177,6 +177,47 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req) {
     return result;
 }
 
+static esp_err_t wifi_ap_config_handler(httpd_req_t *req) {
+    if (req->method == HTTP_GET) {
+        char ssid[33] = {0};
+        char password[65] = {0};
+        wifi_manager_get_ap_config(ssid, sizeof(ssid), password, sizeof(password));
+
+        char payload[128];
+        int written = snprintf(payload, sizeof(payload), "{\"ssid\":\"%s\",\"password\":\"%s\"}", ssid, password);
+        if (written < 0 || written >= (int)sizeof(payload)) {
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ap config overflow");
+        }
+
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, payload, written);
+    }
+
+    char buffer[256];
+    int received = httpd_req_recv(req, buffer, sizeof(buffer) - 1);
+    if (received <= 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body");
+    }
+    buffer[received] = '\0';
+
+    char ssid[33] = {0};
+    char password[65] = {0};
+    if (!json_get_string(buffer, "ssid", ssid, sizeof(ssid))) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing ssid");
+    }
+    if (!json_get_string(buffer, "password", password, sizeof(password))) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing password");
+    }
+
+    esp_err_t err = wifi_manager_set_ap_config(ssid, password);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "config failed");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
+}
+
 void wifi_api_register(httpd_handle_t server) {
     httpd_uri_t status_uri = {
         .uri = "/api/wifi/status",
@@ -209,4 +250,20 @@ void wifi_api_register(httpd_handle_t server) {
         .user_ctx = NULL,
     };
     httpd_register_uri_handler(server, &scan_uri);
+
+    httpd_uri_t ap_config_uri = {
+        .uri = "/api/wifi/ap_config",
+        .method = HTTP_GET,
+        .handler = wifi_ap_config_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &ap_config_uri);
+
+    httpd_uri_t ap_config_post_uri = {
+        .uri = "/api/wifi/ap_config",
+        .method = HTTP_POST,
+        .handler = wifi_ap_config_handler,
+        .user_ctx = NULL,
+    };
+    httpd_register_uri_handler(server, &ap_config_post_uri);
 }

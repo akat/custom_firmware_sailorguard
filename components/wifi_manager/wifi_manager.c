@@ -14,6 +14,8 @@ static const char *TAG = "wifi_manager";
 static const char *k_nvs_ns = "wifi";
 static const char *k_nvs_ssid = "ssid";
 static const char *k_nvs_pass = "pass";
+static const char *k_nvs_ap_ssid = "ap_ssid";
+static const char *k_nvs_ap_pass = "ap_pass";
 
 static esp_netif_t *s_ap_netif = NULL;
 static esp_netif_t *s_sta_netif = NULL;
@@ -27,6 +29,10 @@ static char s_ap_ssid[33] = {0};
 static char s_ap_password[65] = {0};
 static char s_sta_ssid[33] = {0};
 static char s_sta_ip[16] = "0.0.0.0";
+
+static bool s_should_persist_credentials = false;
+static char s_pending_ssid[33] = {0};
+static char s_pending_pass[65] = {0};
 
 static void nvs_save_string(const char *key, const char *value) {
     nvs_handle_t handle;
@@ -124,6 +130,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         s_sta_connected = false;
         s_sta_ssid[0] = '\0';
         snprintf(s_sta_ip, sizeof(s_sta_ip), "0.0.0.0");
+        // Clear pending credentials if disconnected before successful connection
+        if (s_should_persist_credentials) {
+            s_pending_ssid[0] = '\0';
+            s_pending_pass[0] = '\0';
+        }
         esp_wifi_connect();
         schedule_ap_fallback();
     }
@@ -136,12 +147,35 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         s_sta_connected = true;
         update_sta_ip();
         cancel_ap_fallback();
+
+        // Save credentials only after successful connection
+        if (s_should_persist_credentials) {
+            nvs_save_string(k_nvs_ssid, s_pending_ssid);
+            nvs_save_string(k_nvs_pass, s_pending_pass);
+            s_should_persist_credentials = false;
+            ESP_LOGI(TAG, "Credentials saved for SSID: %s", s_pending_ssid);
+        }
     }
 }
 
 void wifi_manager_init(const char *ap_ssid, const char *ap_password, uint32_t ap_fallback_ms) {
+    // Set default AP config
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s", ap_ssid);
     snprintf(s_ap_password, sizeof(s_ap_password), "%s", ap_password);
+
+    // Try to load saved AP config from NVS
+    char saved_ap_ssid[33] = {0};
+    char saved_ap_pass[65] = {0};
+    nvs_load_string(k_nvs_ap_ssid, saved_ap_ssid, sizeof(saved_ap_ssid));
+    nvs_load_string(k_nvs_ap_pass, saved_ap_pass, sizeof(saved_ap_pass));
+
+    if (saved_ap_ssid[0] != '\0') {
+        snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s", saved_ap_ssid);
+        if (saved_ap_pass[0] != '\0') {
+            snprintf(s_ap_password, sizeof(s_ap_password), "%s", saved_ap_pass);
+        }
+    }
+
     s_ap_fallback_ms = ap_fallback_ms;
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
@@ -190,8 +224,10 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password, bool pers
     }
 
     if (persist) {
-        nvs_save_string(k_nvs_ssid, ssid);
-        nvs_save_string(k_nvs_pass, password ? password : "");
+        // Store credentials to be saved only after successful connection
+        s_should_persist_credentials = true;
+        snprintf(s_pending_ssid, sizeof(s_pending_ssid), "%s", ssid);
+        snprintf(s_pending_pass, sizeof(s_pending_pass), "%s", password ? password : "");
     }
 
     err = esp_wifi_connect();
@@ -220,8 +256,8 @@ esp_err_t wifi_manager_scan(wifi_ap_record_t *records, uint16_t *count) {
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
         .scan_time = {
             .active = {
-                .min = 60,
-                .max = 120,
+                .min = 500,
+                .max = 5000,
             },
         },
     };
@@ -258,6 +294,39 @@ void wifi_manager_get_saved_ssid(char *ssid, size_t ssid_len) {
         return;
     }
     nvs_load_string(k_nvs_ssid, ssid, ssid_len);
+}
+
+esp_err_t wifi_manager_get_ap_config(char *ssid, size_t ssid_len, char *password, size_t password_len) {
+    if (!ssid || ssid_len == 0 || !password || password_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    snprintf(ssid, ssid_len, "%s", s_ap_ssid);
+    snprintf(password, password_len, "%s", s_ap_password);
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_set_ap_config(const char *ssid, const char *password) {
+    if (!ssid || ssid[0] == '\0' || !password) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Save to NVS
+    nvs_save_string(k_nvs_ap_ssid, ssid);
+    nvs_save_string(k_nvs_ap_pass, password);
+
+    // Update runtime values
+    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s", ssid);
+    snprintf(s_ap_password, sizeof(s_ap_password), "%s", password);
+
+    // If AP is already started, restart it with new config
+    if (s_ap_started) {
+        s_ap_started = false;
+        start_ap();
+    }
+
+    ESP_LOGI(TAG, "AP configuration updated: SSID=%s", ssid);
+    return ESP_OK;
 }
 
 esp_netif_t *wifi_manager_get_ap_netif(void) {
