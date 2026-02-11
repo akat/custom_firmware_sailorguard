@@ -3,12 +3,61 @@
 #include "signalk_mdns.h"
 #include "signalk_auth.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include <string.h>
 #include <stdio.h>
+
+#if __has_include("esp_websocket_client.h")
+#include "esp_websocket_client.h"
+#define SIGNALK_WS_AVAILABLE 1
+#else
+#include "esp_err.h"
+typedef void *esp_websocket_client_handle_t;
+typedef void *esp_event_base_t;
+typedef struct {
+    const char *uri;
+    const char *headers;
+    int buffer_size;
+    bool disable_auto_reconnect;
+} esp_websocket_client_config_t;
+typedef struct {
+    int data_len;
+    const char *data_ptr;
+} esp_websocket_event_data_t;
+#define WEBSOCKET_EVENT_ANY 0
+#define WEBSOCKET_EVENT_CONNECTED 1
+#define WEBSOCKET_EVENT_DISCONNECTED 2
+#define WEBSOCKET_EVENT_DATA 3
+#define WEBSOCKET_EVENT_ERROR 4
+static inline esp_websocket_client_handle_t esp_websocket_client_init(const esp_websocket_client_config_t *cfg) {
+    (void)cfg;
+    return NULL;
+}
+static inline void esp_websocket_client_destroy(esp_websocket_client_handle_t client) {
+    (void)client;
+}
+static inline esp_err_t esp_websocket_client_start(esp_websocket_client_handle_t client) {
+    (void)client;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static inline esp_err_t esp_websocket_client_stop(esp_websocket_client_handle_t client) {
+    (void)client;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static inline esp_err_t esp_websocket_client_register_event(esp_websocket_client_handle_t client,
+                                                           int32_t event_id,
+                                                           void (*event_handler)(void *, esp_event_base_t, int32_t, void *),
+                                                           void *event_handler_arg) {
+    (void)client;
+    (void)event_id;
+    (void)event_handler;
+    (void)event_handler_arg;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+#define SIGNALK_WS_AVAILABLE 0
+#endif
 
 static const char *TAG = "signalk_client";
 
@@ -18,16 +67,154 @@ static struct {
     signalk_status_t status;
     TaskHandle_t client_task;
     QueueHandle_t command_queue;
+    esp_websocket_client_handle_t ws_client;
+    bool ws_connected;
+    int64_t next_reconnect_ms;
+    int reconnect_delay_ms;
+    char ws_url[256];
+    char ws_headers[256];
     bool initialized;
 } g_signalk_state = {
     .initialized = false,
     .client_task = NULL,
     .command_queue = NULL,
+    .ws_client = NULL,
+    .ws_connected = false,
+    .next_reconnect_ms = 0,
+    .reconnect_delay_ms = 2000,
 };
 
 // Forward declarations
 extern esp_err_t signalk_storage_load_config(signalk_config_t *config);
 extern esp_err_t signalk_storage_save_config(const signalk_config_t *config);
+
+static int64_t signalk_now_ms(void) {
+    return (int64_t)xTaskGetTickCount() * (int64_t)portTICK_PERIOD_MS;
+}
+
+static void signalk_ws_schedule_reconnect(int64_t now_ms) {
+    if (g_signalk_state.reconnect_delay_ms <= 0) {
+        g_signalk_state.reconnect_delay_ms = 2000;
+    } else if (g_signalk_state.reconnect_delay_ms < 30000) {
+        g_signalk_state.reconnect_delay_ms *= 2;
+        if (g_signalk_state.reconnect_delay_ms > 30000) {
+            g_signalk_state.reconnect_delay_ms = 30000;
+        }
+    }
+
+    g_signalk_state.next_reconnect_ms = now_ms + g_signalk_state.reconnect_delay_ms;
+}
+
+static void signalk_ws_reset_reconnect(void) {
+    g_signalk_state.reconnect_delay_ms = 2000;
+    g_signalk_state.next_reconnect_ms = 0;
+}
+
+static void signalk_ws_stop(void) {
+    if (g_signalk_state.ws_client) {
+        esp_websocket_client_stop(g_signalk_state.ws_client);
+        esp_websocket_client_destroy(g_signalk_state.ws_client);
+        g_signalk_state.ws_client = NULL;
+    }
+    g_signalk_state.ws_connected = false;
+}
+
+static void signalk_ws_event_handler(void *handler_args,
+                                     esp_event_base_t base,
+                                     int32_t event_id,
+                                     void *event_data) {
+    (void)handler_args;
+    (void)base;
+
+    if (event_id == WEBSOCKET_EVENT_CONNECTED) {
+        g_signalk_state.ws_connected = true;
+        g_signalk_state.status.state = SIGNALK_STATE_CONNECTED;
+        g_signalk_state.status.error_message[0] = '\0';
+
+        strncpy(g_signalk_state.status.server.hostname,
+                g_signalk_state.config.hostname,
+                sizeof(g_signalk_state.status.server.hostname) - 1);
+        g_signalk_state.status.server.port = g_signalk_state.config.port;
+        g_signalk_state.status.server.ssl_enabled = g_signalk_state.config.use_ssl;
+        ESP_LOGI(TAG, "WebSocket connected");
+        return;
+    }
+
+    if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
+        g_signalk_state.ws_connected = false;
+        g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+        strncpy(g_signalk_state.status.error_message,
+                "WebSocket disconnected",
+                sizeof(g_signalk_state.status.error_message) - 1);
+        signalk_ws_schedule_reconnect(signalk_now_ms());
+        ESP_LOGW(TAG, "WebSocket disconnected");
+        return;
+    }
+
+    if (event_id == WEBSOCKET_EVENT_DATA) {
+        esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+        if (data && data->data_len > 0) {
+            g_signalk_state.status.messages_received++;
+            g_signalk_state.status.last_message_time = signalk_now_ms();
+            g_signalk_state.status.state = SIGNALK_STATE_STREAMING;
+        }
+        return;
+    }
+
+    if (event_id == WEBSOCKET_EVENT_ERROR) {
+        g_signalk_state.ws_connected = false;
+        g_signalk_state.status.state = SIGNALK_STATE_ERROR;
+        strncpy(g_signalk_state.status.error_message,
+                "WebSocket error",
+                sizeof(g_signalk_state.status.error_message) - 1);
+        signalk_ws_schedule_reconnect(signalk_now_ms());
+        ESP_LOGE(TAG, "WebSocket error");
+    }
+}
+
+static esp_err_t signalk_ws_start(void) {
+    const char *scheme = g_signalk_state.config.use_ssl ? "wss" : "ws";
+    snprintf(g_signalk_state.ws_url, sizeof(g_signalk_state.ws_url),
+             "%s://%s:%d/signalk/v1/stream",
+             scheme,
+             g_signalk_state.config.hostname,
+             g_signalk_state.config.port);
+
+    if (g_signalk_state.config.token[0] != '\0') {
+        // Limit token length to avoid header truncation warnings
+        snprintf(g_signalk_state.ws_headers, sizeof(g_signalk_state.ws_headers),
+                 "Authorization: Bearer %.200s\r\n",
+                 g_signalk_state.config.token);
+    } else {
+        g_signalk_state.ws_headers[0] = '\0';
+    }
+
+    if (g_signalk_state.ws_client) {
+        esp_websocket_client_stop(g_signalk_state.ws_client);
+        esp_websocket_client_destroy(g_signalk_state.ws_client);
+        g_signalk_state.ws_client = NULL;
+    }
+
+    esp_websocket_client_config_t cfg = {
+        .uri = g_signalk_state.ws_url,
+        .headers = g_signalk_state.ws_headers,
+        .buffer_size = 1024,
+        .disable_auto_reconnect = true
+    };
+
+    g_signalk_state.ws_client = esp_websocket_client_init(&cfg);
+    if (!g_signalk_state.ws_client) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_websocket_client_register_event(g_signalk_state.ws_client,
+                                        WEBSOCKET_EVENT_ANY,
+                                        signalk_ws_event_handler,
+                                        NULL);
+
+    g_signalk_state.status.state = SIGNALK_STATE_CONNECTING;
+    return esp_websocket_client_start(g_signalk_state.ws_client);
+}
 
 static void signalk_client_task(void *pvParameters) {
     ESP_LOGI(TAG, "SignalK client task started");
@@ -38,7 +225,7 @@ static void signalk_client_task(void *pvParameters) {
     int64_t next_poll_ms = 0;
 
     while (1) {
-        int64_t now_ms = esp_timer_get_time() / 1000;
+        int64_t now_ms = signalk_now_ms();
 
         if (!g_signalk_state.config.enabled) {
             g_signalk_state.status.state = SIGNALK_STATE_DISABLED;
@@ -126,6 +313,22 @@ static void signalk_client_task(void *pvParameters) {
             } else {
                 g_signalk_state.status.authenticated = true;
                 g_signalk_state.status.error_message[0] = '\0';
+                auth_pending = false;
+
+                if (!g_signalk_state.ws_connected) {
+                    if (g_signalk_state.next_reconnect_ms == 0 ||
+                        now_ms >= g_signalk_state.next_reconnect_ms) {
+                        esp_err_t err = signalk_ws_start();
+                        if (err != ESP_OK) {
+                            snprintf(g_signalk_state.status.error_message,
+                                     sizeof(g_signalk_state.status.error_message),
+                                     "WebSocket connect failed");
+                            signalk_ws_schedule_reconnect(now_ms);
+                        } else {
+                            signalk_ws_reset_reconnect();
+                        }
+                    }
+                }
             }
         }
 
@@ -210,6 +413,9 @@ esp_err_t signalk_client_stop(void) {
         g_signalk_state.client_task = NULL;
     }
 
+    signalk_ws_stop();
+    signalk_ws_reset_reconnect();
+
     g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
     return ESP_OK;
 }
@@ -228,6 +434,8 @@ esp_err_t signalk_set_config(const signalk_config_t *config) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    signalk_config_t previous = g_signalk_state.config;
+
     // Save to NVS
     esp_err_t err = signalk_storage_save_config(config);
     if (err != ESP_OK) {
@@ -236,6 +444,17 @@ esp_err_t signalk_set_config(const signalk_config_t *config) {
 
     // Update in-memory config
     memcpy(&g_signalk_state.config, config, sizeof(signalk_config_t));
+
+    bool server_changed =
+        strcmp(previous.hostname, config->hostname) != 0 ||
+        previous.port != config->port ||
+        previous.use_ssl != config->use_ssl ||
+        strcmp(previous.token, config->token) != 0;
+
+    if (server_changed) {
+        signalk_ws_stop();
+        signalk_ws_reset_reconnect();
+    }
 
     // If connection state changes, restart client
     if (config->enabled != g_signalk_state.config.enabled) {
@@ -263,7 +482,7 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (g_signalk_state.status.state != SIGNALK_STATE_STREAMING) {
+    if (!g_signalk_state.ws_connected) {
         ESP_LOGW(TAG, "Not connected, cannot send data");
         return ESP_ERR_INVALID_STATE;
     }
@@ -271,7 +490,7 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
     ESP_LOGI(TAG, "Queueing data for path: %s", data->path);
     g_signalk_state.status.messages_sent++;
 
-    // Actual sending will be implemented in WebSocket phase
+    // Actual payload formatting will be implemented in data phase
     return ESP_OK;
 }
 
@@ -283,6 +502,16 @@ esp_err_t signalk_connect(const char *hostname, uint16_t port) {
     ESP_LOGI(TAG, "Attempting to connect to %s:%d", hostname, port);
     g_signalk_state.status.state = SIGNALK_STATE_CONNECTING;
 
+    strncpy(g_signalk_state.config.hostname, hostname,
+            sizeof(g_signalk_state.config.hostname) - 1);
+    g_signalk_state.config.hostname[sizeof(g_signalk_state.config.hostname) - 1] = '\0';
+    g_signalk_state.config.port = port;
+    signalk_storage_save_config(&g_signalk_state.config);
+
+    signalk_ws_stop();
+    signalk_ws_reset_reconnect();
+    g_signalk_state.next_reconnect_ms = 0;
+
     // Connection logic will be implemented in WebSocket phase
     return ESP_OK;
 }
@@ -290,6 +519,9 @@ esp_err_t signalk_connect(const char *hostname, uint16_t port) {
 esp_err_t signalk_disconnect(void) {
     ESP_LOGI(TAG, "Disconnecting from SignalK server");
     g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+
+    signalk_ws_stop();
+    signalk_ws_reset_reconnect();
 
     // Cleanup logic will be implemented in WebSocket phase
     return ESP_OK;

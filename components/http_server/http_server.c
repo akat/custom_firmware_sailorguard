@@ -86,7 +86,7 @@ static esp_err_t static_file_handler(httpd_req_t *req) {
 
 httpd_handle_t start_http_server(const char *base_path, esp_netif_t *ap_netif) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 32;  // Increased to accommodate all API handlers + static
+    config.max_uri_handlers = 256;  // Increased to accommodate all API handlers + static
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 6144;
 
@@ -107,14 +107,44 @@ void http_server_register_static(httpd_handle_t server, const char *base_path) {
     static static_ctx_t ctx = {0};
     ctx.base_path = base_path;
 
-    httpd_uri_t file_uri = {
-        .uri = "/*",
+    httpd_uri_t index_uri = {
+        .uri = "/",
         .method = HTTP_GET,
         .handler = static_file_handler,
         .user_ctx = &ctx,
     };
 
-    if (httpd_register_uri_handler(server, &file_uri) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register file handler");
+    httpd_uri_t index_html_uri = {
+        .uri = "/index.html",
+        .method = HTTP_GET,
+        .handler = static_file_handler,
+        .user_ctx = &ctx,
+    };
+
+    httpd_uri_t assets_uri = {
+        .uri = "/assets/*",
+        .method = HTTP_GET,
+        .handler = static_file_handler,
+        .user_ctx = &ctx,
+    };
+
+    httpd_uri_t config_uri = {
+        .uri = "/config.json",
+        .method = HTTP_GET,
+        .handler = static_file_handler,
+        .user_ctx = &ctx,
+    };
+
+    if (httpd_register_uri_handler(server, &index_uri) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register / handler");
+    }
+    if (httpd_register_uri_handler(server, &index_html_uri) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /index.html handler");
+    }
+    if (httpd_register_uri_handler(server, &assets_uri) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /assets/* handler");
+    }
+    if (httpd_register_uri_handler(server, &config_uri) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /config.json handler");
     }
 }

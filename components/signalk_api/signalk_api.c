@@ -316,6 +316,13 @@ static esp_err_t signalk_test_handler(httpd_req_t *req) {
 // ============================================================================
 // Register all endpoints
 // ============================================================================
+static void register_uri_or_log(httpd_handle_t server, httpd_uri_t *uri, const char *name) {
+    esp_err_t err = httpd_register_uri_handler(server, uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register %s: %s", name, esp_err_to_name(err));
+    }
+}
+
 void signalk_api_register(httpd_handle_t server) {
     // Status
     httpd_uri_t status_uri = {
@@ -323,7 +330,7 @@ void signalk_api_register(httpd_handle_t server) {
         .method = HTTP_GET,
         .handler = signalk_status_handler,
     };
-    httpd_register_uri_handler(server, &status_uri);
+    register_uri_or_log(server, &status_uri, "signalk status");
 
     // Configuration get
     httpd_uri_t config_get_uri = {
@@ -331,7 +338,7 @@ void signalk_api_register(httpd_handle_t server) {
         .method = HTTP_GET,
         .handler = signalk_config_get_handler,
     };
-    httpd_register_uri_handler(server, &config_get_uri);
+    register_uri_or_log(server, &config_get_uri, "signalk config get");
 
     // Configuration set
     httpd_uri_t config_set_uri = {
@@ -339,7 +346,7 @@ void signalk_api_register(httpd_handle_t server) {
         .method = HTTP_POST,
         .handler = signalk_config_set_handler,
     };
-    httpd_register_uri_handler(server, &config_set_uri);
+    register_uri_or_log(server, &config_set_uri, "signalk config set");
 
     // Discovery
     httpd_uri_t discover_uri = {
@@ -347,7 +354,7 @@ void signalk_api_register(httpd_handle_t server) {
         .method = HTTP_POST,
         .handler = signalk_discover_handler,
     };
-    httpd_register_uri_handler(server, &discover_uri);
+    register_uri_or_log(server, &discover_uri, "signalk discover");
 
     // Discovered servers list
     httpd_uri_t servers_uri = {
@@ -355,7 +362,7 @@ void signalk_api_register(httpd_handle_t server) {
         .method = HTTP_GET,
         .handler = signalk_servers_handler,
     };
-    httpd_register_uri_handler(server, &servers_uri);
+    register_uri_or_log(server, &servers_uri, "signalk servers");
 
     // Connect
     httpd_uri_t connect_uri = {
@@ -363,7 +370,7 @@ void signalk_api_register(httpd_handle_t server) {
         .method = HTTP_POST,
         .handler = signalk_connect_handler,
     };
-    httpd_register_uri_handler(server, &connect_uri);
+    register_uri_or_log(server, &connect_uri, "signalk connect");
 
     // Disconnect
     httpd_uri_t disconnect_uri = {
@@ -371,7 +378,7 @@ void signalk_api_register(httpd_handle_t server) {
         .method = HTTP_POST,
         .handler = signalk_disconnect_handler,
     };
-    httpd_register_uri_handler(server, &disconnect_uri);
+    register_uri_or_log(server, &disconnect_uri, "signalk disconnect");
 
     // Test
     httpd_uri_t test_uri = {
@@ -379,7 +386,7 @@ void signalk_api_register(httpd_handle_t server) {
         .method = HTTP_POST,
         .handler = signalk_test_handler,
     };
-    httpd_register_uri_handler(server, &test_uri);
+    register_uri_or_log(server, &test_uri, "signalk test");
 
     ESP_LOGI(TAG, "SignalK API endpoints registered");
 }

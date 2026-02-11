@@ -34,7 +34,7 @@ export default function SignalKView() {
 
   const loadConfig = async () => {
     try {
-      const response = await fetch("/api/signalk/config");
+      const response = await fetch("/api/signalk/config", { cache: "no-store" });
       const data = await response.json();
       setConfig(data);
     } catch (error) {
@@ -64,6 +64,7 @@ export default function SignalKView() {
       if (response.ok) {
         setSaveMessage("Configuration saved!");
         setTimeout(() => setSaveMessage(""), 3000);
+        loadConfig();
       } else {
         setErrorMessage("Failed to save configuration");
       }
