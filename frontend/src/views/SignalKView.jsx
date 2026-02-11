@@ -4,11 +4,9 @@ export default function SignalKView() {
   const [config, setConfig] = useState({
     enabled: false,
     auto_discovery: true,
-    auth_mode: "manual",
     hostname: "",
     port: 3000,
     use_ssl: false,
-    token: "",
     vessel_name: "SailorGuard"
   });
 
@@ -163,6 +161,10 @@ export default function SignalKView() {
           </div>
         </div>
 
+        {status.state_name === "AUTH_PENDING" && (
+          <p class="message">Waiting for approval from Signal K server…</p>
+        )}
+
         {status.server && status.server.hostname && (
           <div style={{ marginTop: "15px", paddingTop: "15px", borderTop: "1px solid rgba(0,0,0,0.1)" }}>
             <div class="item">
@@ -303,32 +305,10 @@ export default function SignalKView() {
 
         <fieldset class="config-section">
           <legend>Authentication</legend>
-
-          <label class="field" for="sk-authmode">
-            <span>Auth Mode</span>
-            <select
-              id="sk-authmode"
-              class="input select"
-              value={config.auth_mode}
-              onChange={(e) => setConfig({ ...config, auth_mode: e.target.value })}
-            >
-              <option value="manual">Manual Token</option>
-              <option value="auto">Auto Request</option>
-            </select>
-          </label>
-
-          <label class="field" for="sk-token">
-            <span>Access Token</span>
-            <textarea
-              id="sk-token"
-              class="input"
-              value={config.token}
-              onInput={(e) => setConfig({ ...config, token: e.target.value })}
-              placeholder="Paste your Signal K access token here"
-              style={{ minHeight: "100px", fontFamily: "monospace", fontSize: "0.9em" }}
-            />
-            <p class="field-help">Optional. Required for authenticated servers.</p>
-          </label>
+          <p class="section-description">
+            Authentication is automatic. When enabled, the device will request access
+            from the Signal K server and save the token after approval.
+          </p>
         </fieldset>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginBottom: "15px" }}>

@@ -1,10 +1,106 @@
 #include "signalk_auth.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
+#include "cJSON.h"
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 static const char *TAG = "signalk_auth";
 
-// Stub implementations - to be implemented in Phase B
+typedef struct {
+    char *data;
+    size_t size;
+} http_buf_t;
+
+static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
+    http_buf_t *buf = (http_buf_t *)evt->user_data;
+    if (!buf) {
+        return ESP_OK;
+    }
+
+    if (evt->event_id == HTTP_EVENT_ON_DATA && evt->data_len > 0) {
+        char *next = realloc(buf->data, buf->size + evt->data_len + 1);
+        if (!next) {
+            return ESP_ERR_NO_MEM;
+        }
+        buf->data = next;
+        memcpy(buf->data + buf->size, evt->data, evt->data_len);
+        buf->size += evt->data_len;
+        buf->data[buf->size] = '\0';
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t http_request_json(const char *method,
+                                   const char *url,
+                                   const char *body,
+                                   char **response) {
+    if (!method || !url || !response) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    http_buf_t buf = {0};
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .event_handler = http_event_handler,
+        .user_data = &buf,
+        .timeout_ms = 5000,
+        .disable_auto_redirect = false
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_set_method(client, HTTP_METHOD_GET);
+    if (strcmp(method, "POST") == 0) {
+        esp_http_client_set_method(client, HTTP_METHOD_POST);
+    }
+
+    if (body) {
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_post_field(client, body, (int)strlen(body));
+    }
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        if (status >= 200 && status < 300) {
+            if (buf.data) {
+                *response = buf.data;
+            } else {
+                *response = malloc(3);
+                if (*response) {
+                    strcpy(*response, "{}");
+                } else {
+                    err = ESP_ERR_NO_MEM;
+                }
+            }
+        } else {
+            err = ESP_FAIL;
+        }
+    }
+
+    if (err != ESP_OK && buf.data) {
+        free(buf.data);
+    }
+
+    esp_http_client_cleanup(client);
+    return err;
+}
+
+static void extract_request_id(const char *href, char *out_id, size_t out_size) {
+    if (!href || !out_id || out_size == 0) {
+        return;
+    }
+    const char *last = strrchr(href, '/');
+    const char *start = last ? last + 1 : href;
+    strncpy(out_id, start, out_size - 1);
+    out_id[out_size - 1] = '\0';
+}
 
 esp_err_t signalk_auth_request_token(const char *hostname,
                                       uint16_t port,
@@ -16,18 +112,74 @@ esp_err_t signalk_auth_request_token(const char *hostname,
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Requesting token from %s:%d (stub - Phase B)", hostname, port);
-
-    // TODO: Implement token request flow
-    // POST /signalk/v1/access/requests
-    // {
-    //   "clientId": client_id,
-    //   "description": description
-    // }
-    // Returns requestId and requires user approval
+    ESP_LOGI(TAG, "Requesting token from %s:%d", hostname, port);
 
     memset(request, 0, sizeof(signalk_auth_request_t));
-    request->state = AUTH_REQUEST_PENDING;
+
+    char url[256];
+    const char *scheme = use_ssl ? "https" : "http";
+    snprintf(url, sizeof(url), "%s://%s:%d/signalk/v1/access/requests", scheme, hostname, port);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "clientId", client_id);
+    cJSON_AddStringToObject(body, "description", description ? description : "SailorGuard");
+    cJSON_AddStringToObject(body, "clientType", "device");
+    cJSON *permissions = cJSON_CreateArray();
+    cJSON_AddItemToArray(permissions, cJSON_CreateString("readwrite"));
+    cJSON_AddItemToObject(body, "permissions", permissions);
+    char *payload = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+
+    char *response = NULL;
+    esp_err_t err = http_request_json("POST", url, payload, &response);
+    free(payload);
+
+    if (err != ESP_OK || !response) {
+        if (response) {
+            free(response);
+        }
+        return ESP_FAIL;
+    }
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json) {
+        return ESP_FAIL;
+    }
+
+    cJSON *request_id = cJSON_GetObjectItem(json, "requestId");
+    cJSON *href = cJSON_GetObjectItem(json, "href");
+    cJSON *state = cJSON_GetObjectItem(json, "state");
+
+    if (request_id && cJSON_IsString(request_id)) {
+        strncpy(request->request_id, request_id->valuestring, sizeof(request->request_id) - 1);
+    } else if (href && cJSON_IsString(href)) {
+        extract_request_id(href->valuestring, request->request_id, sizeof(request->request_id));
+        strncpy(request->approval_url, href->valuestring, sizeof(request->approval_url) - 1);
+    }
+
+    if (state && cJSON_IsString(state)) {
+        if (strcmp(state->valuestring, "APPROVED") == 0) {
+            request->state = AUTH_REQUEST_APPROVED;
+        } else if (strcmp(state->valuestring, "DENIED") == 0) {
+            request->state = AUTH_REQUEST_DENIED;
+        } else {
+            request->state = AUTH_REQUEST_PENDING;
+        }
+    } else {
+        request->state = AUTH_REQUEST_PENDING;
+    }
+
+    cJSON *token = cJSON_GetObjectItem(json, "token");
+    if (token && cJSON_IsString(token)) {
+        strncpy(request->token, token->valuestring, sizeof(request->token) - 1);
+    }
+
+    cJSON_Delete(json);
+
+    if (request->request_id[0] == '\0') {
+        return ESP_FAIL;
+    }
 
     return ESP_OK;
 }
@@ -41,15 +193,49 @@ esp_err_t signalk_auth_check_request(const char *hostname,
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Checking auth request %s (stub - Phase B)", request_id);
-
-    // TODO: Poll GET /signalk/v1/access/requests/{request_id}
-    // to check if user has approved the request
+    ESP_LOGI(TAG, "Checking auth request %s", request_id);
 
     memset(request, 0, sizeof(signalk_auth_request_t));
-    strcpy(request->request_id, request_id);
-    request->state = AUTH_REQUEST_PENDING;
+    strncpy(request->request_id, request_id, sizeof(request->request_id) - 1);
 
+    char url[256];
+    const char *scheme = use_ssl ? "https" : "http";
+    snprintf(url, sizeof(url), "%s://%s:%d/signalk/v1/access/requests/%s", scheme, hostname, port, request_id);
+
+    char *response = NULL;
+    esp_err_t err = http_request_json("GET", url, NULL, &response);
+    if (err != ESP_OK || !response) {
+        if (response) {
+            free(response);
+        }
+        return ESP_FAIL;
+    }
+
+    cJSON *json = cJSON_Parse(response);
+    free(response);
+    if (!json) {
+        return ESP_FAIL;
+    }
+
+    cJSON *state = cJSON_GetObjectItem(json, "state");
+    if (state && cJSON_IsString(state)) {
+        if (strcmp(state->valuestring, "APPROVED") == 0) {
+            request->state = AUTH_REQUEST_APPROVED;
+        } else if (strcmp(state->valuestring, "DENIED") == 0) {
+            request->state = AUTH_REQUEST_DENIED;
+        } else {
+            request->state = AUTH_REQUEST_PENDING;
+        }
+    } else {
+        request->state = AUTH_REQUEST_PENDING;
+    }
+
+    cJSON *token = cJSON_GetObjectItem(json, "token");
+    if (token && cJSON_IsString(token)) {
+        strncpy(request->token, token->valuestring, sizeof(request->token) - 1);
+    }
+
+    cJSON_Delete(json);
     return ESP_OK;
 }
 

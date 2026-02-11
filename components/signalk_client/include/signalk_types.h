@@ -20,13 +20,6 @@ typedef enum {
     SIGNALK_STATE_ERROR
 } signalk_state_t;
 
-// Authentication modes
-typedef enum {
-    SIGNALK_AUTH_NONE = 0,
-    SIGNALK_AUTH_MANUAL_TOKEN,
-    SIGNALK_AUTH_AUTO_REQUEST
-} signalk_auth_mode_t;
-
 // Server information
 typedef struct {
     char hostname[128];
@@ -39,7 +32,6 @@ typedef struct {
 typedef struct {
     bool enabled;
     bool auto_discovery;
-    signalk_auth_mode_t auth_mode;
     char hostname[128];
     uint16_t port;
     bool use_ssl;

@@ -3,10 +3,12 @@
 #include "signalk_mdns.h"
 #include "signalk_auth.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include <string.h>
+#include <stdio.h>
 
 static const char *TAG = "signalk_client";
 
@@ -30,12 +32,106 @@ extern esp_err_t signalk_storage_save_config(const signalk_config_t *config);
 static void signalk_client_task(void *pvParameters) {
     ESP_LOGI(TAG, "SignalK client task started");
 
+    signalk_auth_request_t auth_request = {0};
+    bool auth_pending = false;
+    int64_t next_request_ms = 0;
+    int64_t next_poll_ms = 0;
+
     while (1) {
-        // Main client loop will be populated in phases
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        int64_t now_ms = esp_timer_get_time() / 1000;
+
+        if (!g_signalk_state.config.enabled) {
+            g_signalk_state.status.state = SIGNALK_STATE_DISABLED;
+            g_signalk_state.status.authenticated = false;
+            g_signalk_state.status.error_message[0] = '\0';
+        } else {
+            g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+
+            if (g_signalk_state.config.hostname[0] == '\0') {
+                snprintf(g_signalk_state.status.error_message,
+                         sizeof(g_signalk_state.status.error_message),
+                         "Hostname not set");
+            } else if (g_signalk_state.config.token[0] == '\0') {
+                g_signalk_state.status.state = SIGNALK_STATE_AUTH_PENDING;
+                g_signalk_state.status.authenticated = false;
+
+                if (!auth_pending && now_ms >= next_request_ms) {
+                    ESP_LOGI(TAG, "Requesting SignalK access token");
+                    memset(&auth_request, 0, sizeof(auth_request));
+
+                    esp_err_t err = signalk_auth_request_token(
+                        g_signalk_state.config.hostname,
+                        g_signalk_state.config.port,
+                        g_signalk_state.config.use_ssl,
+                        g_signalk_state.config.client_id,
+                        g_signalk_state.config.vessel_name,
+                        &auth_request
+                    );
+
+                    if (err == ESP_OK && auth_request.request_id[0] != '\0') {
+                        auth_pending = true;
+                        next_poll_ms = now_ms + 3000;
+                        g_signalk_state.status.error_message[0] = '\0';
+                    } else {
+                        auth_pending = false;
+                        next_request_ms = now_ms + 5000;
+                        snprintf(g_signalk_state.status.error_message,
+                                 sizeof(g_signalk_state.status.error_message),
+                                 "Auth request failed");
+                    }
+                } else if (auth_pending && now_ms >= next_poll_ms) {
+                    signalk_auth_request_t updated = {0};
+                    esp_err_t err = signalk_auth_check_request(
+                        g_signalk_state.config.hostname,
+                        g_signalk_state.config.port,
+                        g_signalk_state.config.use_ssl,
+                        auth_request.request_id,
+                        &updated
+                    );
+
+                    if (err == ESP_OK) {
+                        if (updated.state == AUTH_REQUEST_APPROVED && updated.token[0] != '\0') {
+                            strncpy(g_signalk_state.config.token, updated.token,
+                                    sizeof(g_signalk_state.config.token) - 1);
+                            g_signalk_state.config.token[sizeof(g_signalk_state.config.token) - 1] = '\0';
+                            signalk_storage_save_config(&g_signalk_state.config);
+
+                            g_signalk_state.status.authenticated = true;
+                            g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+                            g_signalk_state.status.error_message[0] = '\0';
+                            auth_pending = false;
+                        } else if (updated.state == AUTH_REQUEST_DENIED) {
+                            auth_pending = false;
+                            next_request_ms = now_ms + 5000;
+                            snprintf(g_signalk_state.status.error_message,
+                                     sizeof(g_signalk_state.status.error_message),
+                                     "Auth denied by server");
+                        } else if (updated.state == AUTH_REQUEST_TIMEOUT) {
+                            auth_pending = false;
+                            next_request_ms = now_ms + 5000;
+                            snprintf(g_signalk_state.status.error_message,
+                                     sizeof(g_signalk_state.status.error_message),
+                                     "Auth request timed out");
+                        } else {
+                            next_poll_ms = now_ms + 3000;
+                        }
+                    } else {
+                        auth_pending = false;
+                        next_request_ms = now_ms + 5000;
+                        snprintf(g_signalk_state.status.error_message,
+                                 sizeof(g_signalk_state.status.error_message),
+                                 "Auth poll failed");
+                    }
+                }
+            } else {
+                g_signalk_state.status.authenticated = true;
+                g_signalk_state.status.error_message[0] = '\0';
+            }
+        }
 
         // Update uptime
         g_signalk_state.status.uptime_seconds++;
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 

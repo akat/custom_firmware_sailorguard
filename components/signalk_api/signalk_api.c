@@ -70,11 +70,9 @@ static esp_err_t signalk_config_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "enabled", config.enabled);
     cJSON_AddBoolToObject(root, "auto_discovery", config.auto_discovery);
-    cJSON_AddNumberToObject(root, "auth_mode", config.auth_mode);
     cJSON_AddStringToObject(root, "hostname", config.hostname);
     cJSON_AddNumberToObject(root, "port", config.port);
     cJSON_AddBoolToObject(root, "use_ssl", config.use_ssl);
-    cJSON_AddStringToObject(root, "token", config.token);
     cJSON_AddStringToObject(root, "vessel_name", config.vessel_name);
 
     char *response = cJSON_PrintUnformatted(root);
@@ -132,9 +130,6 @@ static esp_err_t signalk_config_set_handler(httpd_req_t *req) {
         config.auto_discovery = cJSON_IsTrue(item);
     }
 
-    if ((item = cJSON_GetObjectItem(json, "auth_mode")) && cJSON_IsNumber(item)) {
-        config.auth_mode = (signalk_auth_mode_t)item->valueint;
-    }
 
     if ((item = cJSON_GetObjectItem(json, "hostname")) && cJSON_IsString(item)) {
         strncpy(config.hostname, item->valuestring, sizeof(config.hostname) - 1);
@@ -148,9 +143,6 @@ static esp_err_t signalk_config_set_handler(httpd_req_t *req) {
         config.use_ssl = cJSON_IsTrue(item);
     }
 
-    if ((item = cJSON_GetObjectItem(json, "token")) && cJSON_IsString(item)) {
-        strncpy(config.token, item->valuestring, sizeof(config.token) - 1);
-    }
 
     if ((item = cJSON_GetObjectItem(json, "vessel_name")) && cJSON_IsString(item)) {
         strncpy(config.vessel_name, item->valuestring, sizeof(config.vessel_name) - 1);

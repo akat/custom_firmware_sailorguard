@@ -11,7 +11,6 @@ static const char *SIGNALK_NVS_NAMESPACE = "signalk";
 // NVS Keys
 #define KEY_ENABLED         "enabled"
 #define KEY_AUTO_DISCOVERY  "auto_disc"
-#define KEY_AUTH_MODE       "auth_mode"
 #define KEY_HOSTNAME        "hostname"
 #define KEY_PORT            "port"
 #define KEY_USE_SSL         "use_ssl"
@@ -37,7 +36,6 @@ esp_err_t signalk_storage_load_config(signalk_config_t *config) {
         memset(config, 0, sizeof(signalk_config_t));
         config->enabled = false;
         config->auto_discovery = true;
-        config->auth_mode = SIGNALK_AUTH_MANUAL_TOKEN;
         config->port = 3000;
         config->use_ssl = false;
         strcpy(config->vessel_name, "SailorGuard");
@@ -62,13 +60,6 @@ esp_err_t signalk_storage_load_config(signalk_config_t *config) {
         config->auto_discovery = (bool)u8_val;
     } else {
         config->auto_discovery = true;
-    }
-
-    // auth_mode
-    if (nvs_get_u8(handle, KEY_AUTH_MODE, &u8_val) == ESP_OK) {
-        config->auth_mode = (signalk_auth_mode_t)u8_val;
-    } else {
-        config->auth_mode = SIGNALK_AUTH_MANUAL_TOKEN;
     }
 
     // hostname
@@ -129,7 +120,6 @@ esp_err_t signalk_storage_save_config(const signalk_config_t *config) {
     // Save all values
     nvs_set_u8(handle, KEY_ENABLED, (uint8_t)config->enabled);
     nvs_set_u8(handle, KEY_AUTO_DISCOVERY, (uint8_t)config->auto_discovery);
-    nvs_set_u8(handle, KEY_AUTH_MODE, (uint8_t)config->auth_mode);
     nvs_set_str(handle, KEY_HOSTNAME, config->hostname);
     nvs_set_u16(handle, KEY_PORT, config->port);
     nvs_set_u8(handle, KEY_USE_SSL, (uint8_t)config->use_ssl);
