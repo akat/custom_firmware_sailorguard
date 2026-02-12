@@ -315,7 +315,7 @@ export default function SignalKView() {
                 }
               >
                 <option value="ws">WebSocket only</option>
-                <option value="udp">Disabled (UDP)</option>
+                <option value="udp">UDP only</option>
                 <option value="both">WebSocket + UDP fallback</option>
               </select>
             </label>

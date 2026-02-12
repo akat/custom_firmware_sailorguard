@@ -1,63 +1,179 @@
 {
-  "title": "Device Configuration",
-  "description": "Adjust GPIOs and runtime behavior.",
+  "title": "Anchor Guard Configuration",
+  "description": "Windlass, chain counter, and alert settings.",
   "sections": [
     {
-      "title": "Hardware Configuration",
-      "description": "GPIO pins and hardware settings.",
+      "title": "Relay & Motor",
+      "description": "Windlass relay GPIOs and motor behavior.",
       "fields": [
         {
-          "key": "anchor_gpio",
-          "label": "Anchor GPIO",
+          "key": "relay_up_pin",
+          "label": "Relay UP GPIO",
           "type": "gpio",
-          "default": 4,
+          "default": 26,
           "min": 0,
-          "max": 39,
-          "help": "GPIO used for anchor control output."
+          "max": 39
         },
         {
-          "key": "buzzer_enabled",
-          "label": "Buzzer Enabled",
+          "key": "relay_down_pin",
+          "label": "Relay DOWN GPIO",
+          "type": "gpio",
+          "default": 27,
+          "min": 0,
+          "max": 39
+        },
+        {
+          "key": "relays_active_high",
+          "label": "Relays Active HIGH",
           "type": "bool",
           "default": true
-        }
-      ]
-    },
-    {
-      "title": "Device Behavior",
-      "description": "Runtime behavior and reporting settings.",
-      "fields": [
-        {
-          "key": "report_interval",
-          "label": "Report Interval (seconds)",
-          "type": "number",
-          "default": 30,
-          "min": 5,
-          "max": 3600,
-          "help": "How often the device reports status."
         },
         {
-          "key": "device_mode",
-          "label": "Device Mode",
-          "type": "select",
-          "default": "auto",
-          "options": [
-            { "label": "Auto", "value": "auto" },
-            { "label": "Manual", "value": "manual" }
-          ]
+          "key": "enabled",
+          "label": "Enabled",
+          "type": "bool",
+          "default": true
+        },
+        {
+          "key": "default_chain_seconds",
+          "label": "Default Seconds",
+          "type": "number",
+          "default": 5,
+          "min": 0,
+          "max": 3600,
+          "help": "Default run time when a direction is pressed."
+        },
+        {
+          "key": "neutral_ms",
+          "label": "Neutral Delay (ms)",
+          "type": "number",
+          "default": 400,
+          "min": 0,
+          "max": 5000
         }
       ]
     },
     {
-      "title": "Device Identity",
-      "description": "Device naming and identification.",
+      "title": "Chain Counter",
+      "description": "Chain sensor and calibration.",
       "fields": [
         {
-          "key": "device_label",
-          "label": "Device Label",
-          "type": "text",
-          "default": "SailorGuard",
-          "help": "Friendly name for this device."
+          "key": "chain_sensor_pin",
+          "label": "Chain Sensor GPIO",
+          "type": "gpio",
+          "default": 25,
+          "min": 0,
+          "max": 39
+        },
+        {
+          "key": "chain_sensor_pullup",
+          "label": "Enable Internal Pull-up",
+          "type": "bool",
+          "default": true
+        },
+        {
+          "key": "chain_calibration",
+          "label": "Meters per Pulse",
+          "type": "number",
+          "default": 1,
+          "min": 0.1,
+          "max": 10
+        },
+        {
+          "key": "pulse_debounce_ms",
+          "label": "Pulse Debounce (ms)",
+          "type": "number",
+          "default": 150,
+          "min": 50,
+          "max": 500
+        }
+      ]
+    },
+    {
+      "title": "External Inputs",
+      "description": "External relay inputs for remote control.",
+      "fields": [
+        {
+          "key": "ext_up_gpio",
+          "label": "External UP GPIO",
+          "type": "gpio",
+          "default": 32,
+          "min": -1,
+          "max": 39,
+          "help": "Input from windlass UP relay (-1 to disable)."
+        },
+        {
+          "key": "ext_down_gpio",
+          "label": "External DOWN GPIO",
+          "type": "gpio",
+          "default": 33,
+          "min": -1,
+          "max": 39,
+          "help": "Input from windlass DOWN relay (-1 to disable)."
+        },
+        {
+          "key": "ext_input_active_high",
+          "label": "External Input Active High",
+          "type": "bool",
+          "default": false,
+          "help": "false = Active LOW with pull-up (relay closed = LOW)."
+        },
+        {
+          "key": "ext_input_debounce_ms",
+          "label": "External Input Debounce (ms)",
+          "type": "number",
+          "default": 50,
+          "min": 10,
+          "max": 250
+        }
+      ]
+    },
+    {
+      "title": "Alerts",
+      "description": "Buzzer threshold behavior.",
+      "fields": [
+        {
+          "key": "base_threshold_m",
+          "label": "Base Threshold (m)",
+          "type": "number",
+          "default": 20,
+          "min": 0,
+          "max": 500
+        },
+        {
+          "key": "step_m",
+          "label": "Step (m)",
+          "type": "number",
+          "default": 10,
+          "min": 1,
+          "max": 200
+        },
+        {
+          "key": "base_beeps",
+          "label": "Base Beeps",
+          "type": "number",
+          "default": 1,
+          "min": 1,
+          "max": 10
+        },
+        {
+          "key": "beeps_per_step",
+          "label": "Beeps per Step",
+          "type": "number",
+          "default": 1,
+          "min": 1,
+          "max": 5
+        },
+        {
+          "key": "beep_on_direction",
+          "label": "Beep On Direction",
+          "type": "select",
+          "default": "DOWN",
+          "options": [
+            { "label": "DOWN", "value": "DOWN" },
+            { "label": "UP", "value": "UP" },
+            { "label": "BOTH", "value": "BOTH" }
+          ]
         }
       ]
     }

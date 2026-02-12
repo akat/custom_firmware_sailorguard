@@ -172,10 +172,6 @@ static esp_err_t signalk_config_set_handler(httpd_req_t *req) {
     // Update from JSON
     cJSON *item;
 
-    if ((item = cJSON_GetObjectItem(json, "enabled")) && cJSON_IsBool(item)) {
-        config.enabled = cJSON_IsTrue(item);
-    }
-
     if ((item = cJSON_GetObjectItem(json, "auto_discovery")) && cJSON_IsBool(item)) {
         config.auto_discovery = cJSON_IsTrue(item);
     }
@@ -214,8 +210,8 @@ static esp_err_t signalk_config_set_handler(httpd_req_t *req) {
         strncpy(config.vessel_name, item->valuestring, sizeof(config.vessel_name) - 1);
     }
 
-    // transport_mode controls enabled state
-    config.enabled = (config.transport_mode != SIGNALK_TRANSPORT_UDP);
+    // Transport is always enabled (no UI toggle)
+    config.enabled = true;
 
     cJSON_Delete(json);
 
@@ -399,6 +395,7 @@ static esp_err_t signalk_send_data_handler(httpd_req_t *req) {
     // Prepare signalk_data_t
     signalk_data_t data = {0};
     strncpy(data.path, path_item->valuestring, sizeof(data.path) - 1);
+    data.priority = SIGNALK_PRIORITY_NORMAL;
 
     // Determine type and convert value
     if (cJSON_IsNull(value_item)) {
@@ -445,6 +442,18 @@ static esp_err_t signalk_send_data_handler(httpd_req_t *req) {
         strncpy(data.source_label, source_item->valuestring, sizeof(data.source_label) - 1);
     } else {
         strncpy(data.source_label, "sailorguard", sizeof(data.source_label) - 1);
+    }
+
+    // Optional: priority ("instant" or numeric > 0)
+    cJSON *priority_item = cJSON_GetObjectItem(json, "priority");
+    if (priority_item) {
+        if (cJSON_IsString(priority_item) && priority_item->valuestring) {
+            if (strcasecmp(priority_item->valuestring, "instant") == 0) {
+                data.priority = SIGNALK_PRIORITY_INSTANT;
+            }
+        } else if (cJSON_IsNumber(priority_item) && priority_item->valuedouble > 0) {
+            data.priority = SIGNALK_PRIORITY_INSTANT;
+        }
     }
 
     cJSON_Delete(json);

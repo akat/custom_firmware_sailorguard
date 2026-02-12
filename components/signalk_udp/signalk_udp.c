@@ -319,6 +319,12 @@ esp_err_t signalk_udp_send(const signalk_data_t *data) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "context", "vessels.self");
 
+    if (data->priority == SIGNALK_PRIORITY_INSTANT) {
+        cJSON *meta_source = cJSON_CreateObject();
+        cJSON_AddStringToObject(meta_source, "priority", "instant");
+        cJSON_AddItemToObject(root, "$source", meta_source);
+    }
+
     cJSON *updates = cJSON_CreateArray();
     cJSON *update = cJSON_CreateObject();
     cJSON_AddNumberToObject(update, "timestamp",

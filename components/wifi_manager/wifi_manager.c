@@ -1,10 +1,13 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <time.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif_ip_addr.h"
 #include "esp_timer.h"
+#include "esp_sntp.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -25,6 +28,7 @@ static bool s_sta_connected = false;
 static bool s_ap_started = false;
 static bool s_scanning = false;
 static uint32_t s_ap_fallback_ms = 15000;
+static bool s_sntp_started = false;
 
 static char s_ap_ssid[33] = {0};
 static char s_ap_password[65] = {0};
@@ -123,6 +127,22 @@ static void update_sta_ip(void) {
     snprintf(s_sta_ip, sizeof(s_sta_ip), "0.0.0.0");
 }
 
+static void start_sntp(void) {
+    if (s_sntp_started) {
+        return;
+    }
+
+    setenv("TZ", "UTC0", 1);
+    tzset();
+
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+
+    s_sntp_started = true;
+    ESP_LOGI(TAG, "SNTP started (server=pool.ntp.org)");
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
     (void)arg;
     (void)event_data;
@@ -151,6 +171,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         s_sta_connected = true;
         update_sta_ip();
         cancel_ap_fallback();
+        start_sntp();
 
         // Save credentials only after successful connection
         if (s_should_persist_credentials) {

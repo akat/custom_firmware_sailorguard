@@ -75,7 +75,7 @@ static const char *TAG = "signalk_client";
 #define SIGNALK_MAX_SUBSCRIPTIONS  8
 #define SIGNALK_MAX_CALLBACKS      4
 #define SIGNALK_MAX_DATA_CACHE     16
-#define SIGNALK_DUPLICATE_WINDOW_MS 1000
+#define SIGNALK_DUPLICATE_WINDOW_MS 100
 
 typedef enum {
     SIGNALK_SOURCE_WS = 0,
@@ -714,8 +714,10 @@ esp_err_t signalk_client_init(void) {
         ESP_LOGE(TAG, "Failed to load configuration: %s", esp_err_to_name(err));
         return err;
     }
-    g_signalk_state.config.enabled =
-        (g_signalk_state.config.transport_mode != SIGNALK_TRANSPORT_UDP);
+    if (!g_signalk_state.config.enabled) {
+        g_signalk_state.config.enabled = true;
+        signalk_storage_save_config(&g_signalk_state.config);
+    }
 
     // Initialize status
     memset(&g_signalk_state.status, 0, sizeof(signalk_status_t));
@@ -813,7 +815,6 @@ esp_err_t signalk_set_config(const signalk_config_t *config) {
 
     signalk_config_t previous = g_signalk_state.config;
     signalk_config_t adjusted = *config;
-    adjusted.enabled = (adjusted.transport_mode != SIGNALK_TRANSPORT_UDP);
 
     // Save to NVS
     esp_err_t err = signalk_storage_save_config(&adjusted);
@@ -881,6 +882,12 @@ static esp_err_t signalk_send_ws_data(const signalk_data_t *data) {
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "context", "vessels.self");
+
+    if (data->priority == SIGNALK_PRIORITY_INSTANT) {
+        cJSON *meta_source = cJSON_CreateObject();
+        cJSON_AddStringToObject(meta_source, "priority", "instant");
+        cJSON_AddItemToObject(root, "$source", meta_source);
+    }
 
     cJSON *updates = cJSON_CreateArray();
     cJSON *update = cJSON_CreateObject();

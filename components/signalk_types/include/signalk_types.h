@@ -73,6 +73,12 @@ typedef enum {
     SIGNALK_VALUE_POSITION
 } signalk_value_type_t;
 
+// Send priority for deltas
+typedef enum {
+    SIGNALK_PRIORITY_NORMAL = 0,
+    SIGNALK_PRIORITY_INSTANT
+} signalk_priority_t;
+
 // Position data
 typedef struct {
     double latitude;
@@ -95,6 +101,7 @@ typedef struct {
     signalk_value_type_t type;
     signalk_value_data_t value;
     char source_label[32];
+    signalk_priority_t priority;
 } signalk_data_t;
 
 // Discovered server (from mDNS)
