@@ -38,7 +38,7 @@ esp_err_t signalk_storage_load_config(signalk_config_t *config) {
         ESP_LOGW(TAG, "No saved config, using defaults");
         // Set defaults
         memset(config, 0, sizeof(signalk_config_t));
-        config->enabled = false;
+        config->enabled = true;
         config->auto_discovery = true;
         config->transport_mode = SIGNALK_TRANSPORT_BOTH;
         config->port = 3000;

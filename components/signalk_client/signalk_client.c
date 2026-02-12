@@ -714,6 +714,8 @@ esp_err_t signalk_client_init(void) {
         ESP_LOGE(TAG, "Failed to load configuration: %s", esp_err_to_name(err));
         return err;
     }
+    g_signalk_state.config.enabled =
+        (g_signalk_state.config.transport_mode != SIGNALK_TRANSPORT_UDP);
 
     // Initialize status
     memset(&g_signalk_state.status, 0, sizeof(signalk_status_t));
@@ -810,38 +812,40 @@ esp_err_t signalk_set_config(const signalk_config_t *config) {
     }
 
     signalk_config_t previous = g_signalk_state.config;
+    signalk_config_t adjusted = *config;
+    adjusted.enabled = (adjusted.transport_mode != SIGNALK_TRANSPORT_UDP);
 
     // Save to NVS
-    esp_err_t err = signalk_storage_save_config(config);
+    esp_err_t err = signalk_storage_save_config(&adjusted);
     if (err != ESP_OK) {
         return err;
     }
 
     // Update in-memory config
-    memcpy(&g_signalk_state.config, config, sizeof(signalk_config_t));
+    memcpy(&g_signalk_state.config, &adjusted, sizeof(signalk_config_t));
 
     bool server_changed =
-        strcmp(previous.hostname, config->hostname) != 0 ||
-        previous.port != config->port ||
-        previous.use_ssl != config->use_ssl ||
-        strcmp(previous.token, config->token) != 0;
+        strcmp(previous.hostname, adjusted.hostname) != 0 ||
+        previous.port != adjusted.port ||
+        previous.use_ssl != adjusted.use_ssl ||
+        strcmp(previous.token, adjusted.token) != 0;
 
     bool udp_changed =
-        strcmp(previous.udp_target_ip, config->udp_target_ip) != 0 ||
-        previous.udp_broadcast_port != config->udp_broadcast_port ||
-        previous.udp_listen_port != config->udp_listen_port;
+        strcmp(previous.udp_target_ip, adjusted.udp_target_ip) != 0 ||
+        previous.udp_broadcast_port != adjusted.udp_broadcast_port ||
+        previous.udp_listen_port != adjusted.udp_listen_port;
 
-    bool enabled_changed = previous.enabled != config->enabled;
-    bool transport_changed = previous.transport_mode != config->transport_mode;
+    bool enabled_changed = previous.enabled != adjusted.enabled;
+    bool transport_changed = previous.transport_mode != adjusted.transport_mode;
 
-    if (server_changed || !signalk_ws_enabled(config)) {
+    if (server_changed || !signalk_ws_enabled(&adjusted)) {
         signalk_ws_stop();
         signalk_ws_reset_reconnect();
     }
 
-    if (!config->enabled) {
+    if (!adjusted.enabled) {
         signalk_udp_stop();
-    } else if (signalk_udp_enabled(config)) {
+    } else if (signalk_udp_enabled(&adjusted)) {
         if (udp_changed || transport_changed || !signalk_udp_is_running()) {
             signalk_udp_stop();
             signalk_udp_start_from_config();
@@ -851,7 +855,7 @@ esp_err_t signalk_set_config(const signalk_config_t *config) {
     }
 
     if (enabled_changed) {
-        if (config->enabled) {
+        if (adjusted.enabled) {
             signalk_client_start();
         } else {
             signalk_client_stop();

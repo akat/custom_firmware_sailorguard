@@ -289,18 +289,6 @@ export default function SignalKView() {
             }}
           >
             <h3>Connection</h3>
-            <label class="field toggle-row" for="sk-enabled">
-              <input
-                id="sk-enabled"
-                type="checkbox"
-                checked={config.enabled}
-                onChange={(e) =>
-                  setConfig({ ...config, enabled: e.target.checked })
-                }
-              />
-              <span>Enable Signal K</span>
-            </label>
-
             <label class="field" for="sk-vessel">
               <span>Description</span>
               <input
@@ -327,7 +315,7 @@ export default function SignalKView() {
                 }
               >
                 <option value="ws">WebSocket only</option>
-                <option value="udp">UDP only</option>
+                <option value="udp">Disabled (UDP)</option>
                 <option value="both">WebSocket + UDP fallback</option>
               </select>
             </label>

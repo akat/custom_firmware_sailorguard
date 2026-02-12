@@ -214,6 +214,9 @@ static esp_err_t signalk_config_set_handler(httpd_req_t *req) {
         strncpy(config.vessel_name, item->valuestring, sizeof(config.vessel_name) - 1);
     }
 
+    // transport_mode controls enabled state
+    config.enabled = (config.transport_mode != SIGNALK_TRANSPORT_UDP);
+
     cJSON_Delete(json);
 
     // Save new configuration
