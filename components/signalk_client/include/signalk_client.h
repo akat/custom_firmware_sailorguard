@@ -75,6 +75,41 @@ esp_err_t signalk_disconnect(void);
  */
 esp_err_t signalk_test_connection(const char *hostname, uint16_t port);
 
+/**
+ * @brief Subscribe to a SignalK data path
+ * @param path SignalK path (e.g., "navigation.position")
+ * @param period_ms Desired update period in ms (0 = server default)
+ * @return ESP_OK on success, ESP_ERR_NO_MEM if slots full
+ */
+esp_err_t signalk_subscribe(const char *path, uint32_t period_ms);
+
+/**
+ * @brief Unsubscribe from a SignalK data path
+ * @param path The path to unsubscribe from
+ * @return ESP_OK on success, ESP_ERR_NOT_FOUND if not subscribed
+ */
+esp_err_t signalk_unsubscribe(const char *path);
+
+/**
+ * @brief Register a callback for incoming delta data.
+ *        Callbacks fire from the WS event context - keep them fast.
+ * @param path_filter If non-NULL, only deltas with this path prefix trigger the callback. NULL = all.
+ * @param callback Function to call
+ * @param user_ctx Opaque pointer passed to callback
+ * @return ESP_OK on success, ESP_ERR_NO_MEM if slots full
+ */
+esp_err_t signalk_register_callback(const char *path_filter,
+                                     signalk_data_callback_t callback,
+                                     void *user_ctx);
+
+/**
+ * @brief Get the latest cached value for a path
+ * @param path The SignalK path to look up
+ * @param data Output: populated with latest value if found
+ * @return ESP_OK if found, ESP_ERR_NOT_FOUND if no cached data
+ */
+esp_err_t signalk_get_cached_value(const char *path, signalk_data_t *data);
+
 #ifdef __cplusplus
 }
 #endif

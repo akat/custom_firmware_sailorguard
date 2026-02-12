@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -25,6 +26,7 @@ typedef struct {
 typedef struct {
     int data_len;
     const char *data_ptr;
+    int payload_len;
 } esp_websocket_event_data_t;
 #define WEBSOCKET_EVENT_ANY 0
 #define WEBSOCKET_EVENT_CONNECTED 1
@@ -46,20 +48,32 @@ static inline esp_err_t esp_websocket_client_stop(esp_websocket_client_handle_t 
     (void)client;
     return ESP_ERR_NOT_SUPPORTED;
 }
-static inline esp_err_t esp_websocket_client_register_event(esp_websocket_client_handle_t client,
-                                                           int32_t event_id,
-                                                           void (*event_handler)(void *, esp_event_base_t, int32_t, void *),
-                                                           void *event_handler_arg) {
+static inline esp_err_t esp_websocket_register_events(esp_websocket_client_handle_t client,
+                                                       int32_t event_id,
+                                                       void (*event_handler)(void *, esp_event_base_t, int32_t, void *),
+                                                       void *event_handler_arg) {
     (void)client;
     (void)event_id;
     (void)event_handler;
     (void)event_handler_arg;
     return ESP_ERR_NOT_SUPPORTED;
 }
+static inline int esp_websocket_client_send_text(esp_websocket_client_handle_t client,
+                                                  const char *data, int len, TickType_t timeout) {
+    (void)client;
+    (void)data;
+    (void)len;
+    (void)timeout;
+    return -1;
+}
 #define SIGNALK_WS_AVAILABLE 0
 #endif
 
 static const char *TAG = "signalk_client";
+
+#define SIGNALK_MAX_SUBSCRIPTIONS  8
+#define SIGNALK_MAX_CALLBACKS      4
+#define SIGNALK_MAX_DATA_CACHE     16
 
 // Global state
 static struct {
@@ -74,6 +88,27 @@ static struct {
     char ws_url[256];
     char ws_headers[256];
     bool initialized;
+
+    // Subscriptions
+    signalk_subscription_t subscriptions[SIGNALK_MAX_SUBSCRIPTIONS];
+    uint8_t subscription_count;
+    bool subscriptions_sent;
+
+    // Callbacks
+    struct {
+        signalk_data_callback_t fn;
+        void *ctx;
+        char path_filter[128];
+    } callbacks[SIGNALK_MAX_CALLBACKS];
+    uint8_t callback_count;
+
+    // Data cache
+    signalk_data_t data_cache[SIGNALK_MAX_DATA_CACHE];
+    uint8_t data_cache_count;
+
+    // Server hello
+    char self_context[128];
+    bool hello_received;
 } g_signalk_state = {
     .initialized = false,
     .client_task = NULL,
@@ -117,7 +152,190 @@ static void signalk_ws_stop(void) {
         g_signalk_state.ws_client = NULL;
     }
     g_signalk_state.ws_connected = false;
+    g_signalk_state.hello_received = false;
+    g_signalk_state.subscriptions_sent = false;
 }
+
+// --- Delta parsing helpers ---
+
+static void signalk_parse_value(cJSON *value_item, signalk_data_t *data) {
+    if (!value_item || cJSON_IsNull(value_item)) {
+        data->type = SIGNALK_VALUE_NULL;
+    } else if (cJSON_IsBool(value_item)) {
+        data->type = SIGNALK_VALUE_BOOL;
+        data->value.b = cJSON_IsTrue(value_item);
+    } else if (cJSON_IsNumber(value_item)) {
+        data->type = SIGNALK_VALUE_FLOAT;
+        data->value.f = (float)value_item->valuedouble;
+    } else if (cJSON_IsString(value_item)) {
+        data->type = SIGNALK_VALUE_STRING;
+        strncpy(data->value.s, value_item->valuestring, sizeof(data->value.s) - 1);
+        data->value.s[sizeof(data->value.s) - 1] = '\0';
+    } else if (cJSON_IsObject(value_item)) {
+        cJSON *lat = cJSON_GetObjectItem(value_item, "latitude");
+        cJSON *lon = cJSON_GetObjectItem(value_item, "longitude");
+        if (lat && lon && cJSON_IsNumber(lat) && cJSON_IsNumber(lon)) {
+            data->type = SIGNALK_VALUE_POSITION;
+            data->value.pos.latitude = lat->valuedouble;
+            data->value.pos.longitude = lon->valuedouble;
+            cJSON *alt = cJSON_GetObjectItem(value_item, "altitude");
+            if (alt && cJSON_IsNumber(alt)) {
+                data->value.pos.altitude = alt->valuedouble;
+            }
+        } else {
+            data->type = SIGNALK_VALUE_STRING;
+            char *printed = cJSON_PrintUnformatted(value_item);
+            if (printed) {
+                strncpy(data->value.s, printed, sizeof(data->value.s) - 1);
+                data->value.s[sizeof(data->value.s) - 1] = '\0';
+                free(printed);
+            }
+        }
+    }
+}
+
+static void signalk_update_cache(const signalk_data_t *data) {
+    for (int i = 0; i < g_signalk_state.data_cache_count; i++) {
+        if (strcmp(g_signalk_state.data_cache[i].path, data->path) == 0) {
+            memcpy(&g_signalk_state.data_cache[i], data, sizeof(signalk_data_t));
+            return;
+        }
+    }
+
+    if (g_signalk_state.data_cache_count < SIGNALK_MAX_DATA_CACHE) {
+        memcpy(&g_signalk_state.data_cache[g_signalk_state.data_cache_count],
+               data, sizeof(signalk_data_t));
+        g_signalk_state.data_cache_count++;
+    }
+}
+
+static void signalk_fire_callbacks(const signalk_data_t *data) {
+    for (int i = 0; i < g_signalk_state.callback_count; i++) {
+        const char *filter = g_signalk_state.callbacks[i].path_filter;
+        if (filter[0] == '\0' ||
+            strncmp(data->path, filter, strlen(filter)) == 0) {
+            g_signalk_state.callbacks[i].fn(data, g_signalk_state.callbacks[i].ctx);
+        }
+    }
+}
+
+static void signalk_handle_hello(cJSON *json) {
+    cJSON *self = cJSON_GetObjectItem(json, "self");
+    if (self && cJSON_IsString(self)) {
+        strncpy(g_signalk_state.self_context, self->valuestring,
+                sizeof(g_signalk_state.self_context) - 1);
+        g_signalk_state.self_context[sizeof(g_signalk_state.self_context) - 1] = '\0';
+    }
+    cJSON *name = cJSON_GetObjectItem(json, "name");
+    g_signalk_state.hello_received = true;
+    ESP_LOGI(TAG, "Hello from server: %s, self=%s",
+             (name && cJSON_IsString(name)) ? name->valuestring : "?",
+             g_signalk_state.self_context);
+}
+
+static void signalk_handle_delta(cJSON *json) {
+    cJSON *updates = cJSON_GetObjectItem(json, "updates");
+    if (!updates || !cJSON_IsArray(updates)) {
+        return;
+    }
+
+    cJSON *update;
+    cJSON_ArrayForEach(update, updates) {
+        char source_label[32] = {0};
+        cJSON *source = cJSON_GetObjectItem(update, "source");
+        if (source) {
+            cJSON *label = cJSON_GetObjectItem(source, "label");
+            if (label && cJSON_IsString(label)) {
+                strncpy(source_label, label->valuestring, sizeof(source_label) - 1);
+            }
+        }
+
+        cJSON *values = cJSON_GetObjectItem(update, "values");
+        if (!values || !cJSON_IsArray(values)) {
+            continue;
+        }
+
+        cJSON *val_entry;
+        cJSON_ArrayForEach(val_entry, values) {
+            cJSON *path_item = cJSON_GetObjectItem(val_entry, "path");
+            cJSON *value_item = cJSON_GetObjectItem(val_entry, "value");
+            if (!path_item || !cJSON_IsString(path_item)) {
+                continue;
+            }
+
+            signalk_data_t data = {0};
+            strncpy(data.path, path_item->valuestring, sizeof(data.path) - 1);
+            strncpy(data.source_label, source_label, sizeof(data.source_label) - 1);
+
+            signalk_parse_value(value_item, &data);
+            signalk_update_cache(&data);
+            signalk_fire_callbacks(&data);
+        }
+    }
+}
+
+// --- Subscription helpers ---
+
+static esp_err_t signalk_send_subscribe_msg(const char *path, uint32_t period_ms) {
+    if (!g_signalk_state.ws_client || !g_signalk_state.ws_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "context", "vessels.self");
+
+    cJSON *subscribe = cJSON_CreateArray();
+    cJSON *entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "path", path);
+    if (period_ms > 0) {
+        cJSON_AddNumberToObject(entry, "period", period_ms);
+    }
+    cJSON_AddItemToArray(subscribe, entry);
+    cJSON_AddItemToObject(root, "subscribe", subscribe);
+
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!payload) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "Subscribe: %s", payload);
+    int sent = esp_websocket_client_send_text(
+        g_signalk_state.ws_client, payload, (int)strlen(payload), pdMS_TO_TICKS(1000));
+    free(payload);
+
+    return (sent >= 0) ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t signalk_send_unsubscribe_msg(const char *path) {
+    if (!g_signalk_state.ws_client || !g_signalk_state.ws_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "context", "vessels.self");
+
+    cJSON *unsubscribe = cJSON_CreateArray();
+    cJSON *entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "path", path);
+    cJSON_AddItemToArray(unsubscribe, entry);
+    cJSON_AddItemToObject(root, "unsubscribe", unsubscribe);
+
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!payload) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "Unsubscribe: %s", payload);
+    int sent = esp_websocket_client_send_text(
+        g_signalk_state.ws_client, payload, (int)strlen(payload), pdMS_TO_TICKS(1000));
+    free(payload);
+
+    return (sent >= 0) ? ESP_OK : ESP_FAIL;
+}
+
+// --- WebSocket event handler ---
 
 static void signalk_ws_event_handler(void *handler_args,
                                      esp_event_base_t base,
@@ -128,6 +346,8 @@ static void signalk_ws_event_handler(void *handler_args,
 
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         g_signalk_state.ws_connected = true;
+        g_signalk_state.hello_received = false;
+        g_signalk_state.subscriptions_sent = false;
         g_signalk_state.status.state = SIGNALK_STATE_CONNECTED;
         g_signalk_state.status.error_message[0] = '\0';
 
@@ -142,6 +362,8 @@ static void signalk_ws_event_handler(void *handler_args,
 
     if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
         g_signalk_state.ws_connected = false;
+        g_signalk_state.hello_received = false;
+        g_signalk_state.subscriptions_sent = false;
         g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
         strncpy(g_signalk_state.status.error_message,
                 "WebSocket disconnected",
@@ -152,12 +374,41 @@ static void signalk_ws_event_handler(void *handler_args,
     }
 
     if (event_id == WEBSOCKET_EVENT_DATA) {
-        esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
-        if (data && data->data_len > 0) {
-            g_signalk_state.status.messages_received++;
-            g_signalk_state.status.last_message_time = signalk_now_ms();
-            g_signalk_state.status.state = SIGNALK_STATE_STREAMING;
+        esp_websocket_event_data_t *ws_data = (esp_websocket_event_data_t *)event_data;
+        if (!ws_data || ws_data->data_len <= 0) {
+            return;
         }
+
+        // Only handle complete frames
+        if (ws_data->payload_len != ws_data->data_len) {
+            ESP_LOGW(TAG, "Fragmented WS message (%d/%d), skipping",
+                     ws_data->data_len, ws_data->payload_len);
+            return;
+        }
+
+        // Null-terminate for JSON parsing
+        char *buf = malloc((size_t)ws_data->data_len + 1);
+        if (!buf) {
+            return;
+        }
+        memcpy(buf, ws_data->data_ptr, (size_t)ws_data->data_len);
+        buf[ws_data->data_len] = '\0';
+
+        cJSON *json = cJSON_Parse(buf);
+        free(buf);
+
+        if (json) {
+            if (cJSON_GetObjectItem(json, "updates")) {
+                signalk_handle_delta(json);
+                g_signalk_state.status.state = SIGNALK_STATE_STREAMING;
+            } else if (cJSON_GetObjectItem(json, "version")) {
+                signalk_handle_hello(json);
+            }
+            cJSON_Delete(json);
+        }
+
+        g_signalk_state.status.messages_received++;
+        g_signalk_state.status.last_message_time = signalk_now_ms();
         return;
     }
 
@@ -175,13 +426,12 @@ static void signalk_ws_event_handler(void *handler_args,
 static esp_err_t signalk_ws_start(void) {
     const char *scheme = g_signalk_state.config.use_ssl ? "wss" : "ws";
     snprintf(g_signalk_state.ws_url, sizeof(g_signalk_state.ws_url),
-             "%s://%s:%d/signalk/v1/stream",
+             "%s://%s:%d/signalk/v1/stream?subscribe=none",
              scheme,
              g_signalk_state.config.hostname,
              g_signalk_state.config.port);
 
     if (g_signalk_state.config.token[0] != '\0') {
-        // Limit token length to avoid header truncation warnings
         snprintf(g_signalk_state.ws_headers, sizeof(g_signalk_state.ws_headers),
                  "Authorization: Bearer %.200s\r\n",
                  g_signalk_state.config.token);
@@ -198,7 +448,7 @@ static esp_err_t signalk_ws_start(void) {
     esp_websocket_client_config_t cfg = {
         .uri = g_signalk_state.ws_url,
         .headers = g_signalk_state.ws_headers,
-        .buffer_size = 1024,
+        .buffer_size = 2048,
         .disable_auto_reconnect = true
     };
 
@@ -207,14 +457,16 @@ static esp_err_t signalk_ws_start(void) {
         return ESP_ERR_NO_MEM;
     }
 
-    esp_websocket_client_register_event(g_signalk_state.ws_client,
-                                        WEBSOCKET_EVENT_ANY,
-                                        signalk_ws_event_handler,
-                                        NULL);
+    esp_websocket_register_events(g_signalk_state.ws_client,
+                                  WEBSOCKET_EVENT_ANY,
+                                  signalk_ws_event_handler,
+                                  NULL);
 
     g_signalk_state.status.state = SIGNALK_STATE_CONNECTING;
     return esp_websocket_client_start(g_signalk_state.ws_client);
 }
+
+// --- Main client task ---
 
 static void signalk_client_task(void *pvParameters) {
     ESP_LOGI(TAG, "SignalK client task started");
@@ -329,6 +581,23 @@ static void signalk_client_task(void *pvParameters) {
                         }
                     }
                 }
+
+                // Send subscriptions after hello received
+                if (g_signalk_state.ws_connected &&
+                    g_signalk_state.hello_received &&
+                    !g_signalk_state.subscriptions_sent &&
+                    g_signalk_state.subscription_count > 0) {
+
+                    ESP_LOGI(TAG, "Sending %d subscriptions",
+                             g_signalk_state.subscription_count);
+                    for (int i = 0; i < g_signalk_state.subscription_count; i++) {
+                        signalk_send_subscribe_msg(
+                            g_signalk_state.subscriptions[i].path,
+                            g_signalk_state.subscriptions[i].period_ms);
+                        vTaskDelay(pdMS_TO_TICKS(50));
+                    }
+                    g_signalk_state.subscriptions_sent = true;
+                }
             }
         }
 
@@ -337,6 +606,8 @@ static void signalk_client_task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
+
+// --- Public API ---
 
 esp_err_t signalk_client_init(void) {
     if (g_signalk_state.initialized) {
@@ -363,7 +634,6 @@ esp_err_t signalk_client_init(void) {
         return ESP_ERR_NO_MEM;
     }
 
-    // Create client task (but don't start it yet)
     g_signalk_state.initialized = true;
     ESP_LOGI(TAG, "SignalK client initialized");
 
@@ -483,15 +753,174 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
     }
 
     if (!g_signalk_state.ws_connected) {
-        ESP_LOGW(TAG, "Not connected, cannot send data");
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Queueing data for path: %s", data->path);
-    g_signalk_state.status.messages_sent++;
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "context", "vessels.self");
 
-    // Actual payload formatting will be implemented in data phase
+    cJSON *updates = cJSON_CreateArray();
+    cJSON *update = cJSON_CreateObject();
+
+    cJSON *source = cJSON_CreateObject();
+    cJSON_AddStringToObject(source, "label",
+        data->source_label[0] ? data->source_label : "sailorguard");
+    cJSON_AddItemToObject(update, "source", source);
+
+    cJSON *values = cJSON_CreateArray();
+    cJSON *val = cJSON_CreateObject();
+    cJSON_AddStringToObject(val, "path", data->path);
+
+    switch (data->type) {
+        case SIGNALK_VALUE_NULL:
+            cJSON_AddNullToObject(val, "value");
+            break;
+        case SIGNALK_VALUE_BOOL:
+            cJSON_AddBoolToObject(val, "value", data->value.b);
+            break;
+        case SIGNALK_VALUE_INT:
+            cJSON_AddNumberToObject(val, "value", data->value.i);
+            break;
+        case SIGNALK_VALUE_FLOAT:
+            cJSON_AddNumberToObject(val, "value", (double)data->value.f);
+            break;
+        case SIGNALK_VALUE_STRING:
+            cJSON_AddStringToObject(val, "value", data->value.s);
+            break;
+        case SIGNALK_VALUE_POSITION: {
+            cJSON *pos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pos, "latitude", data->value.pos.latitude);
+            cJSON_AddNumberToObject(pos, "longitude", data->value.pos.longitude);
+            if (data->value.pos.altitude != 0.0) {
+                cJSON_AddNumberToObject(pos, "altitude", data->value.pos.altitude);
+            }
+            cJSON_AddItemToObject(val, "value", pos);
+            break;
+        }
+    }
+
+    cJSON_AddItemToArray(values, val);
+    cJSON_AddItemToObject(update, "values", values);
+    cJSON_AddItemToArray(updates, update);
+    cJSON_AddItemToObject(root, "updates", updates);
+
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!payload) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    int sent = esp_websocket_client_send_text(
+        g_signalk_state.ws_client, payload, (int)strlen(payload), pdMS_TO_TICKS(1000));
+    free(payload);
+
+    if (sent < 0) {
+        ESP_LOGE(TAG, "Failed to send delta");
+        return ESP_FAIL;
+    }
+
+    g_signalk_state.status.messages_sent++;
     return ESP_OK;
+}
+
+esp_err_t signalk_subscribe(const char *path, uint32_t period_ms) {
+    if (!path || path[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Update existing subscription
+    for (int i = 0; i < g_signalk_state.subscription_count; i++) {
+        if (strcmp(g_signalk_state.subscriptions[i].path, path) == 0) {
+            g_signalk_state.subscriptions[i].period_ms = period_ms;
+            if (g_signalk_state.ws_connected) {
+                signalk_send_subscribe_msg(path, period_ms);
+            }
+            return ESP_OK;
+        }
+    }
+
+    if (g_signalk_state.subscription_count >= SIGNALK_MAX_SUBSCRIPTIONS) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    signalk_subscription_t *sub =
+        &g_signalk_state.subscriptions[g_signalk_state.subscription_count++];
+    strncpy(sub->path, path, sizeof(sub->path) - 1);
+    sub->path[sizeof(sub->path) - 1] = '\0';
+    sub->period_ms = period_ms;
+
+    if (g_signalk_state.ws_connected) {
+        signalk_send_subscribe_msg(path, period_ms);
+    }
+
+    ESP_LOGI(TAG, "Subscribed to %s (period=%lu ms)", path, (unsigned long)period_ms);
+    return ESP_OK;
+}
+
+esp_err_t signalk_unsubscribe(const char *path) {
+    if (!path || path[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (int i = 0; i < g_signalk_state.subscription_count; i++) {
+        if (strcmp(g_signalk_state.subscriptions[i].path, path) == 0) {
+            if (g_signalk_state.ws_connected) {
+                signalk_send_unsubscribe_msg(path);
+            }
+
+            // Shift remaining subscriptions
+            for (int j = i; j < g_signalk_state.subscription_count - 1; j++) {
+                g_signalk_state.subscriptions[j] = g_signalk_state.subscriptions[j + 1];
+            }
+            g_signalk_state.subscription_count--;
+
+            ESP_LOGI(TAG, "Unsubscribed from %s", path);
+            return ESP_OK;
+        }
+    }
+
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t signalk_register_callback(const char *path_filter,
+                                     signalk_data_callback_t callback,
+                                     void *user_ctx) {
+    if (!callback) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (g_signalk_state.callback_count >= SIGNALK_MAX_CALLBACKS) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    int idx = g_signalk_state.callback_count++;
+    g_signalk_state.callbacks[idx].fn = callback;
+    g_signalk_state.callbacks[idx].ctx = user_ctx;
+    if (path_filter && path_filter[0]) {
+        strncpy(g_signalk_state.callbacks[idx].path_filter, path_filter,
+                sizeof(g_signalk_state.callbacks[idx].path_filter) - 1);
+        g_signalk_state.callbacks[idx].path_filter[sizeof(g_signalk_state.callbacks[idx].path_filter) - 1] = '\0';
+    } else {
+        g_signalk_state.callbacks[idx].path_filter[0] = '\0';
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t signalk_get_cached_value(const char *path, signalk_data_t *data) {
+    if (!path || !data) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (int i = 0; i < g_signalk_state.data_cache_count; i++) {
+        if (strcmp(g_signalk_state.data_cache[i].path, path) == 0) {
+            memcpy(data, &g_signalk_state.data_cache[i], sizeof(signalk_data_t));
+            return ESP_OK;
+        }
+    }
+
+    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t signalk_connect(const char *hostname, uint16_t port) {
@@ -512,7 +941,6 @@ esp_err_t signalk_connect(const char *hostname, uint16_t port) {
     signalk_ws_reset_reconnect();
     g_signalk_state.next_reconnect_ms = 0;
 
-    // Connection logic will be implemented in WebSocket phase
     return ESP_OK;
 }
 
@@ -523,7 +951,6 @@ esp_err_t signalk_disconnect(void) {
     signalk_ws_stop();
     signalk_ws_reset_reconnect();
 
-    // Cleanup logic will be implemented in WebSocket phase
     return ESP_OK;
 }
 

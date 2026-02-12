@@ -96,6 +96,15 @@ typedef struct {
     char version[32];
 } signalk_discovered_server_t;
 
+// Callback for incoming delta data
+typedef void (*signalk_data_callback_t)(const signalk_data_t *data, void *user_ctx);
+
+// Subscription entry
+typedef struct {
+    char path[128];
+    uint32_t period_ms;  // 0 = server default
+} signalk_subscription_t;
+
 // Auth request status
 typedef struct {
     char request_id[64];

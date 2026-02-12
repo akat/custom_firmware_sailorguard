@@ -9,4 +9,6 @@ idf_component_register(
              config_api
     PRIV_REQUIRES esp_event
                   freertos
+                  esp_websocket_client
+                  json
 )

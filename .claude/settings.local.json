@@ -14,7 +14,8 @@
       "Bash(idf.py build:*)",
       "Bash(where:*)",
       "Bash(cmd /c:*)",
-      "Bash(C:Usersakatsaris.platformiopenvScriptspio.exe run -e esp32dev)"
+      "Bash(C:Usersakatsaris.platformiopenvScriptspio.exe run -e esp32dev)",
+      "WebFetch(domain:signalk.org)"
     ]
   }
 }
