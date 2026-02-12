@@ -267,7 +267,7 @@ static void signalk_client_task(void *pvParameters) {
                                  "Auth request failed");
                     }
                 } else if (auth_pending && now_ms >= next_poll_ms) {
-                    signalk_auth_request_t updated = {0};
+                    signalk_auth_request_t updated = auth_request;
                     esp_err_t err = signalk_auth_check_request(
                         g_signalk_state.config.hostname,
                         g_signalk_state.config.port,

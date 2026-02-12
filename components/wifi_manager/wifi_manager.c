@@ -215,6 +215,11 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password, bool pers
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Stop any in-progress connection so set_config/connect can succeed
+    s_scanning = true;
+    esp_wifi_disconnect();
+    s_scanning = false;
+
     wifi_config_t config = {0};
     snprintf((char *)config.sta.ssid, sizeof(config.sta.ssid), "%s", ssid);
     snprintf((char *)config.sta.password, sizeof(config.sta.password), "%s", password ? password : "");

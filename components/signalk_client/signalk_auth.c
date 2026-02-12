@@ -209,6 +209,10 @@ esp_err_t signalk_auth_request_token(const char *hostname,
         strncpy(request->request_id, request_id->valuestring, sizeof(request->request_id) - 1);
     } else if (href && cJSON_IsString(href)) {
         extract_request_id(href->valuestring, request->request_id, sizeof(request->request_id));
+    }
+
+    // Always store href so check_request can use the server's URL
+    if (href && cJSON_IsString(href)) {
         strncpy(request->approval_url, href->valuestring, sizeof(request->approval_url) - 1);
     }
 
@@ -234,12 +238,21 @@ esp_err_t signalk_auth_check_request(const char *hostname,
 
     ESP_LOGI(TAG, "Checking auth request %s", request_id);
 
+    // Preserve approval_url from the original POST response
+    char saved_url[256] = {0};
+    strncpy(saved_url, request->approval_url, sizeof(saved_url) - 1);
+
     memset(request, 0, sizeof(signalk_auth_request_t));
     strncpy(request->request_id, request_id, sizeof(request->request_id) - 1);
 
-    char url[256];
+    char url[512];
     const char *scheme = use_ssl ? "https" : "http";
-    snprintf(url, sizeof(url), "%s://%s:%d/signalk/v1/access/requests/%s", scheme, hostname, port, request_id);
+    if (saved_url[0] != '\0') {
+        // Use the href returned by the server (e.g. /signalk/v1/requests/{id})
+        snprintf(url, sizeof(url), "%s://%s:%d%s", scheme, hostname, port, saved_url);
+    } else {
+        snprintf(url, sizeof(url), "%s://%s:%d/signalk/v1/access/requests/%s", scheme, hostname, port, request_id);
+    }
 
     char *response = NULL;
     esp_err_t err = http_request_json("GET", url, NULL, &response);
