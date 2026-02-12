@@ -287,6 +287,136 @@ static esp_err_t signalk_clear_token_handler(httpd_req_t *req) {
 }
 
 // ============================================================================
+// POST /api/signalk/send - Send SignalK data via WebSocket
+// ============================================================================
+static esp_err_t signalk_send_data_handler(httpd_req_t *req) {
+    size_t total_len = req->content_len;
+    if (total_len == 0 || total_len > 1024) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body size");
+    }
+
+    char *buffer = malloc(total_len + 1);
+    if (!buffer) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+
+    int len = httpd_req_recv(req, buffer, total_len);
+    if (len <= 0) {
+        free(buffer);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
+    }
+    buffer[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buffer);
+    free(buffer);
+    if (!json) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    }
+
+    // Extract path
+    cJSON *path_item = cJSON_GetObjectItem(json, "path");
+    if (!path_item || !cJSON_IsString(path_item) || !path_item->valuestring[0]) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or empty path");
+    }
+
+    // Extract value (any type)
+    cJSON *value_item = cJSON_GetObjectItem(json, "value");
+    if (!value_item) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing value");
+    }
+
+    // Prepare signalk_data_t
+    signalk_data_t data = {0};
+    strncpy(data.path, path_item->valuestring, sizeof(data.path) - 1);
+
+    // Determine type and convert value
+    if (cJSON_IsNull(value_item)) {
+        data.type = SIGNALK_VALUE_NULL;
+    } else if (cJSON_IsBool(value_item)) {
+        data.type = SIGNALK_VALUE_BOOL;
+        data.value.b = cJSON_IsTrue(value_item);
+    } else if (cJSON_IsNumber(value_item)) {
+        // Check if it's an integer or float
+        if (value_item->valuedouble == (double)(long)value_item->valuedouble) {
+            data.type = SIGNALK_VALUE_INT;
+            data.value.i = (int64_t)value_item->valuedouble;
+        } else {
+            data.type = SIGNALK_VALUE_FLOAT;
+            data.value.f = (float)value_item->valuedouble;
+        }
+    } else if (cJSON_IsString(value_item)) {
+        data.type = SIGNALK_VALUE_STRING;
+        strncpy(data.value.s, value_item->valuestring, sizeof(data.value.s) - 1);
+    } else if (cJSON_IsObject(value_item)) {
+        // Check if it's a position object
+        cJSON *lat = cJSON_GetObjectItem(value_item, "latitude");
+        cJSON *lon = cJSON_GetObjectItem(value_item, "longitude");
+        if (lat && lon && cJSON_IsNumber(lat) && cJSON_IsNumber(lon)) {
+            data.type = SIGNALK_VALUE_POSITION;
+            data.value.pos.latitude = lat->valuedouble;
+            data.value.pos.longitude = lon->valuedouble;
+            cJSON *alt = cJSON_GetObjectItem(value_item, "altitude");
+            if (alt && cJSON_IsNumber(alt)) {
+                data.value.pos.altitude = alt->valuedouble;
+            }
+        } else {
+            cJSON_Delete(json);
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid object format");
+        }
+    } else {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unsupported value type");
+    }
+
+    // Optional: source label
+    cJSON *source_item = cJSON_GetObjectItem(json, "source");
+    if (source_item && cJSON_IsString(source_item) && source_item->valuestring[0]) {
+        strncpy(data.source_label, source_item->valuestring, sizeof(data.source_label) - 1);
+    } else {
+        strncpy(data.source_label, "sailorguard", sizeof(data.source_label) - 1);
+    }
+
+    cJSON_Delete(json);
+
+    // Send the data
+    esp_err_t err = signalk_send_data(&data);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Send failed path=%s err=0x%x", data.path, (unsigned int)err);
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", false);
+        char *response;
+        if (err == ESP_ERR_INVALID_STATE) {
+            cJSON_AddStringToObject(root, "error", "Not connected to SignalK server");
+        } else if (err == ESP_ERR_INVALID_ARG) {
+            cJSON_AddStringToObject(root, "error", "Invalid argument");
+        } else {
+            cJSON_AddStringToObject(root, "error", "Failed to send data");
+        }
+        response = cJSON_PrintUnformatted(root);
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t result = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+        free(response);
+        cJSON_Delete(root);
+        return result;
+    }
+
+    ESP_LOGI(TAG, "Send ok path=%s", data.path);
+    // Success response
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "message", "Data sent");
+    cJSON_AddStringToObject(root, "path", data.path);
+    char *response = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t result = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    free(response);
+    cJSON_Delete(root);
+    return result;
+}
+
+// ============================================================================
 // POST /api/signalk/test - Test connection
 // ============================================================================
 static esp_err_t signalk_test_handler(httpd_req_t *req) {
@@ -475,6 +605,14 @@ void signalk_api_register(httpd_handle_t server) {
         .handler = signalk_clear_token_handler,
     };
     register_uri_or_log(server, &clear_token_uri, "signalk clear token");
+
+    // Send data
+    httpd_uri_t send_data_uri = {
+        .uri = "/api/signalk/send",
+        .method = HTTP_POST,
+        .handler = signalk_send_data_handler,
+    };
+    register_uri_or_log(server, &send_data_uri, "signalk send data");
 
     // Test
     httpd_uri_t test_uri = {

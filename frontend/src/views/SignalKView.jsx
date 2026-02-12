@@ -24,6 +24,11 @@ export default function SignalKView() {
   const [saveMessage, setSaveMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
 
+  // Send data states
+  const [sendPath, setSendPath] = useState("navigation.sailorguard.anchor");
+  const [sendValue, setSendValue] = useState("");
+  const [isSending, setIsSending] = useState(false);
+
   // Load config and status on mount
   useEffect(() => {
     loadConfig();
@@ -150,6 +155,61 @@ export default function SignalKView() {
       }
     } catch (error) {
       setErrorMessage("Error: " + error.message);
+    }
+  };
+
+  const sendData = async () => {
+    if (!sendPath || sendValue === "") {
+      setErrorMessage("Please enter both path and value");
+      return;
+    }
+
+    if (status.state_name !== "STREAMING" && status.state_name !== "CONNECTED") {
+      setErrorMessage("Not connected to Signal K server. Please connect first.");
+      return;
+    }
+
+    setIsSending(true);
+    try {
+      setErrorMessage("");
+      
+      // Parse the value to the appropriate type
+      let parsedValue;
+      if (sendValue === "true") {
+        parsedValue = true;
+      } else if (sendValue === "false") {
+        parsedValue = false;
+      } else if (!isNaN(sendValue) && sendValue !== "") {
+        // Try to parse as number
+        parsedValue = parseFloat(sendValue);
+      } else {
+        // Keep as string
+        parsedValue = sendValue;
+      }
+
+      const response = await fetch("/api/signalk/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: sendPath,
+          value: parsedValue,
+          source: "sailorguard"
+        })
+      });
+
+      const result = await response.json();
+
+      if (result.ok) {
+        setSaveMessage(`Successfully sent ${sendPath} = ${sendValue}`);
+        setSendValue("");
+        setTimeout(() => setSaveMessage(""), 3000);
+      } else {
+        setErrorMessage("Failed to send data: " + (result.error || "Unknown error"));
+      }
+    } catch (error) {
+      setErrorMessage("Error: " + error.message);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -334,6 +394,50 @@ export default function SignalKView() {
           </button>
           <p class="section-description" style={{ fontSize: "0.85em", marginTop: "5px", color: "#666" }}>
             Use this to restart the authentication process if needed.
+          </p>
+        </fieldset>
+
+        <fieldset class="config-section">
+          <legend>Send Data to Signal K</legend>
+          <p class="section-description">
+            Send values to the Signal K server using the WebSocket connection. The device must be connected first.
+          </p>
+          
+          <label class="field" for="sk-send-path">
+            <span>SignalK Path</span>
+            <input
+              id="sk-send-path"
+              class="input"
+              type="text"
+              value={sendPath}
+              onInput={(e) => setSendPath(e.target.value)}
+              placeholder="e.g., navigation.sailorguard.anchor"
+            />
+          </label>
+
+          <label class="field" for="sk-send-value">
+            <span>Value</span>
+            <input
+              id="sk-send-value"
+              class="input"
+              type="text"
+              value={sendValue}
+              onInput={(e) => setSendValue(e.target.value)}
+              placeholder="e.g., 45.5 or true or text value"
+            />
+          </label>
+
+          <button 
+            type="button" 
+            onClick={sendData} 
+            disabled={isSending || status.state_name !== "STREAMING" && status.state_name !== "CONNECTED"}
+            class="button primary" 
+            style={{ marginTop: "10px", width: "100%" }}
+          >
+            {isSending ? "Sending..." : "Send Data"}
+          </button>
+          <p class="section-description" style={{ fontSize: "0.85em", marginTop: "5px", color: "#666" }}>
+            Values are automatically parsed as numbers (integers/floats), booleans (true/false), or strings.
           </p>
         </fieldset>
 

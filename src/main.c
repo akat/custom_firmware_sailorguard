@@ -39,7 +39,7 @@ static void signalk_data_cb(const signalk_data_t *data, void *user_ctx) {
 	}
 }
 
-// Task that sends a test value to navigation.anchor.akat every 2 seconds
+// Task that sends a test value to navigation.sailorguard.anchor every 2 seconds
 static void signalk_test_sender_task(void *pvParameters) {
 	(void)pvParameters;
 	float test_value = 0.0f;
@@ -48,14 +48,14 @@ static void signalk_test_sender_task(void *pvParameters) {
 		vTaskDelay(pdMS_TO_TICKS(2000));
 
 		signalk_data_t data = {0};
-		strncpy(data.path, "navigation.anchor.akat", sizeof(data.path) - 1);
+		strncpy(data.path, "navigation.sailorguard.anchor", sizeof(data.path) - 1);
 		data.type = SIGNALK_VALUE_FLOAT;
 		data.value.f = test_value;
 		strncpy(data.source_label, "sailorguard", sizeof(data.source_label) - 1);
 
 		esp_err_t err = signalk_send_data(&data);
 		if (err == ESP_OK) {
-			ESP_LOGI(TAG, "[SK-TX] Sent navigation.anchor.akat = %.1f", test_value);
+			ESP_LOGI(TAG, "[SK-TX] Sent navigation.sailorguard.anchor = %.1f", test_value);
 		}
 
 		test_value += 1.0f;
@@ -92,13 +92,13 @@ void app_main(void) {
 	signalk_register_callback(NULL, signalk_data_cb, NULL);
 
 	// Subscribe to SignalK paths
-	signalk_subscribe("navigation.anchor.akat", 2000);
+	signalk_subscribe("navigation.sailorguard.anchor", 2000);
 	signalk_subscribe("navigation.position", 1000);
 	signalk_subscribe("environment.depth.belowTransducer", 1000);
 	signalk_subscribe("environment.wind.angleApparent", 1000);
 	signalk_subscribe("environment.wind.speedApparent", 1000);
 
-	// Start test sender task (sends navigation.anchor.akat every 2s)
+	// Start test sender task (sends navigation.sailorguard.anchor every 2s)
 	xTaskCreate(signalk_test_sender_task, "sk_test_tx", 4096, NULL, 3, NULL);
 
 	// Register static file handler AFTER all API handlers
