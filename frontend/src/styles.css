@@ -154,6 +154,52 @@ h1 {
   gap: 14px;
 }
 
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.config-widget {
+  border: 1px solid #ddd;
+  border-radius: 18px;
+  background: #fff;
+  overflow: hidden;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+}
+
+.config-widget-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #ddd;
+}
+
+.config-widget-header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.config-widget-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-widget-body .field {
+  padding-bottom: 12px;
+  border-bottom: 1px solid #eee;
+}
+
+.config-widget-body .field:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
 .action-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
