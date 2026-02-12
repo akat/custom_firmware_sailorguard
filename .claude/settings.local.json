@@ -9,7 +9,12 @@
       "Bash(cmd /c \"dir /s /b C:\\\\Users\\\\akatsaris\\\\.platformio\\\\penv\\\\Scripts\\\\pio* 2>nul\")",
       "Bash(cmd /c \"dir /s /b C:\\\\Users\\\\akatsaris\\\\.platformio\\\\penv\\\\Scripts\\\\* 2>nul | findstr /i pio\")",
       "Bash(cmd /c \"mode\")",
-      "Bash(powershell -Command:*)"
+      "Bash(powershell -Command:*)",
+      "Bash(find:*)",
+      "Bash(idf.py build:*)",
+      "Bash(where:*)",
+      "Bash(cmd /c:*)",
+      "Bash(C:Usersakatsaris.platformiopenvScriptspio.exe run -e esp32dev)"
     ]
   }
 }

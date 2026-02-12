@@ -23,6 +23,7 @@ static esp_timer_handle_t s_ap_fallback_timer = NULL;
 
 static bool s_sta_connected = false;
 static bool s_ap_started = false;
+static bool s_scanning = false;
 static uint32_t s_ap_fallback_ms = 15000;
 
 static char s_ap_ssid[33] = {0};
@@ -135,8 +136,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             s_pending_ssid[0] = '\0';
             s_pending_pass[0] = '\0';
         }
-        esp_wifi_connect();
-        schedule_ap_fallback();
+        // Don't auto-reconnect while scanning
+        if (!s_scanning) {
+            esp_wifi_connect();
+            schedule_ap_fallback();
+        }
     }
 
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -242,6 +246,12 @@ esp_err_t wifi_manager_scan(wifi_ap_record_t *records, uint16_t *count) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Stop STA reconnection loop so scan can proceed
+    s_scanning = true;
+    if (!s_sta_connected) {
+        esp_wifi_disconnect();
+    }
+
     uint8_t primary = 0;
     wifi_second_chan_t secondary = WIFI_SECOND_CHAN_NONE;
     if (s_ap_started) {
@@ -263,12 +273,23 @@ esp_err_t wifi_manager_scan(wifi_ap_record_t *records, uint16_t *count) {
     };
 
     esp_err_t err = esp_wifi_scan_start(&scan_config, true);
-    if (err != ESP_OK) {
-        return err;
+
+    uint16_t ap_num = 0;
+    if (err == ESP_OK) {
+        ap_num = *count;
+        err = esp_wifi_scan_get_ap_records(&ap_num, records);
     }
 
-    uint16_t ap_num = *count;
-    err = esp_wifi_scan_get_ap_records(&ap_num, records);
+    // Resume STA reconnection if not connected
+    s_scanning = false;
+    if (!s_sta_connected) {
+        wifi_config_t config;
+        if (esp_wifi_get_config(WIFI_IF_STA, &config) == ESP_OK && config.sta.ssid[0] != '\0') {
+            esp_wifi_connect();
+            schedule_ap_fallback();
+        }
+    }
+
     if (err != ESP_OK) {
         return err;
     }
