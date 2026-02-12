@@ -154,6 +154,13 @@ h1 {
   gap: 14px;
 }
 
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+
 .config-form {
   display: flex;
   flex-direction: column;
@@ -291,6 +298,12 @@ h1 {
   margin: 0;
   color: var(--muted);
   font-weight: 600;
+}
+
+.muted {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .wifi-list {
