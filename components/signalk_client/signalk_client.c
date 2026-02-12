@@ -484,7 +484,9 @@ static void signalk_client_task(void *pvParameters) {
             g_signalk_state.status.authenticated = false;
             g_signalk_state.status.error_message[0] = '\0';
         } else {
-            g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+            if (!g_signalk_state.ws_connected) {
+                g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+            }
 
             if (g_signalk_state.config.hostname[0] == '\0') {
                 snprintf(g_signalk_state.status.error_message,
