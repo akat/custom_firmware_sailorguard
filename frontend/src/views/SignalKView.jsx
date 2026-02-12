@@ -4,9 +4,13 @@ export default function SignalKView() {
   const [config, setConfig] = useState({
     enabled: false,
     auto_discovery: true,
+    transport_mode: "both",
     hostname: "",
     port: 3000,
     use_ssl: false,
+    udp_target_ip: "255.255.255.255",
+    udp_broadcast_port: 5555,
+    udp_listen_port: 5556,
     vessel_name: "SailorGuard"
   });
 
@@ -289,6 +293,20 @@ export default function SignalKView() {
         <fieldset class="config-section">
           <legend>Server Settings</legend>
 
+          <label class="field" for="sk-transport">
+            <span>Transport Mode</span>
+            <select
+              id="sk-transport"
+              class="input"
+              value={config.transport_mode}
+              onChange={(e) => setConfig({ ...config, transport_mode: e.target.value })}
+            >
+              <option value="ws">WebSocket only</option>
+              <option value="udp">UDP only</option>
+              <option value="both">WebSocket + UDP fallback</option>
+            </select>
+          </label>
+
           <label class="field toggle-row" for="sk-autodiscovery">
             <input
               id="sk-autodiscovery"
@@ -381,6 +399,48 @@ export default function SignalKView() {
             />
             <span>Use SSL/TLS</span>
           </label>
+
+          {(config.transport_mode === "udp" || config.transport_mode === "both") && (
+            <>
+              <label class="field" for="sk-udp-ip">
+                <span>UDP Target IP</span>
+                <input
+                  id="sk-udp-ip"
+                  class="input"
+                  type="text"
+                  value={config.udp_target_ip}
+                  onInput={(e) => setConfig({ ...config, udp_target_ip: e.target.value })}
+                  placeholder="255.255.255.255"
+                />
+              </label>
+
+              <label class="field" for="sk-udp-bcast">
+                <span>UDP Broadcast Port</span>
+                <input
+                  id="sk-udp-bcast"
+                  class="input"
+                  type="number"
+                  value={config.udp_broadcast_port}
+                  onInput={(e) => setConfig({ ...config, udp_broadcast_port: parseInt(e.target.value) })}
+                  min="1"
+                  max="65535"
+                />
+              </label>
+
+              <label class="field" for="sk-udp-listen">
+                <span>UDP Listen Port</span>
+                <input
+                  id="sk-udp-listen"
+                  class="input"
+                  type="number"
+                  value={config.udp_listen_port}
+                  onInput={(e) => setConfig({ ...config, udp_listen_port: parseInt(e.target.value) })}
+                  min="1"
+                  max="65535"
+                />
+              </label>
+            </>
+          )}
         </fieldset>
 
         <fieldset class="config-section">
@@ -441,7 +501,7 @@ export default function SignalKView() {
           </p>
         </fieldset>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginBottom: "15px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginTop: "10px", marginBottom: "15px" }}>
           <button type="submit" class="button primary">
             Save Configuration
           </button>

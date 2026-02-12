@@ -7,6 +7,8 @@ idf_component_register(
     REQUIRES nvs_flash
              esp_http_client
              config_api
+             signalk_udp
+             signalk_types
     PRIV_REQUIRES esp_event
                   freertos
                   esp_websocket_client

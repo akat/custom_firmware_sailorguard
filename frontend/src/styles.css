@@ -16,7 +16,7 @@
 body {
   margin: 0;
   font-family: "Space Grotesk", "Arial", sans-serif;
-  background: radial-gradient(circle at top left, #fdf3e7 0%, #f2f1eb 45%, #e9edf0 100%);
+  /* background: radial-gradient(circle at top left, #fdf3e7 0%, #f2f1eb 45%, #e9edf0 100%); */
   color: var(--ink);
   min-height: 100vh;
 }

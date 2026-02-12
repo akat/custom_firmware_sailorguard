@@ -20,6 +20,13 @@ typedef enum {
     SIGNALK_STATE_ERROR
 } signalk_state_t;
 
+// Transport mode
+typedef enum {
+    SIGNALK_TRANSPORT_WS = 0,
+    SIGNALK_TRANSPORT_UDP,
+    SIGNALK_TRANSPORT_BOTH
+} signalk_transport_mode_t;
+
 // Server information
 typedef struct {
     char hostname[128];
@@ -32,9 +39,13 @@ typedef struct {
 typedef struct {
     bool enabled;
     bool auto_discovery;
+    signalk_transport_mode_t transport_mode;
     char hostname[128];
     uint16_t port;
     bool use_ssl;
+    char udp_target_ip[16];
+    uint16_t udp_broadcast_port;
+    uint16_t udp_listen_port;
     char token[512];
     char vessel_name[64];
     char client_id[64];

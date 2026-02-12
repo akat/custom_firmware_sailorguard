@@ -2,6 +2,7 @@
 #include "signalk_client.h"
 #include "signalk_mdns.h"
 #include "signalk_auth.h"
+#include "signalk_udp.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -74,6 +75,18 @@ static const char *TAG = "signalk_client";
 #define SIGNALK_MAX_SUBSCRIPTIONS  8
 #define SIGNALK_MAX_CALLBACKS      4
 #define SIGNALK_MAX_DATA_CACHE     16
+#define SIGNALK_DUPLICATE_WINDOW_MS 1000
+
+typedef enum {
+    SIGNALK_SOURCE_WS = 0,
+    SIGNALK_SOURCE_UDP
+} signalk_transport_source_t;
+
+typedef struct {
+    signalk_data_t data;
+    int64_t last_update_ms;
+    signalk_transport_source_t source;
+} signalk_cache_entry_t;
 
 // Global state
 static struct {
@@ -103,7 +116,7 @@ static struct {
     uint8_t callback_count;
 
     // Data cache
-    signalk_data_t data_cache[SIGNALK_MAX_DATA_CACHE];
+    signalk_cache_entry_t data_cache[SIGNALK_MAX_DATA_CACHE];
     uint8_t data_cache_count;
 
     // Server hello
@@ -156,6 +169,16 @@ static void signalk_ws_stop(void) {
     g_signalk_state.subscriptions_sent = false;
 }
 
+static bool signalk_ws_enabled(const signalk_config_t *config) {
+    return config->transport_mode == SIGNALK_TRANSPORT_WS ||
+           config->transport_mode == SIGNALK_TRANSPORT_BOTH;
+}
+
+static bool signalk_udp_enabled(const signalk_config_t *config) {
+    return config->transport_mode == SIGNALK_TRANSPORT_UDP ||
+           config->transport_mode == SIGNALK_TRANSPORT_BOTH;
+}
+
 // --- Delta parsing helpers ---
 
 static void signalk_parse_value(cJSON *value_item, signalk_data_t *data) {
@@ -194,19 +217,44 @@ static void signalk_parse_value(cJSON *value_item, signalk_data_t *data) {
     }
 }
 
-static void signalk_update_cache(const signalk_data_t *data) {
+static void signalk_update_cache(const signalk_data_t *data, signalk_transport_source_t source) {
+    int64_t now_ms = signalk_now_ms();
+
     for (int i = 0; i < g_signalk_state.data_cache_count; i++) {
-        if (strcmp(g_signalk_state.data_cache[i].path, data->path) == 0) {
-            memcpy(&g_signalk_state.data_cache[i], data, sizeof(signalk_data_t));
+        if (strcmp(g_signalk_state.data_cache[i].data.path, data->path) == 0) {
+            memcpy(&g_signalk_state.data_cache[i].data, data, sizeof(signalk_data_t));
+            g_signalk_state.data_cache[i].last_update_ms = now_ms;
+            g_signalk_state.data_cache[i].source = source;
             return;
         }
     }
 
     if (g_signalk_state.data_cache_count < SIGNALK_MAX_DATA_CACHE) {
-        memcpy(&g_signalk_state.data_cache[g_signalk_state.data_cache_count],
-               data, sizeof(signalk_data_t));
-        g_signalk_state.data_cache_count++;
+        signalk_cache_entry_t *entry =
+            &g_signalk_state.data_cache[g_signalk_state.data_cache_count++];
+        memcpy(&entry->data, data, sizeof(signalk_data_t));
+        entry->last_update_ms = now_ms;
+        entry->source = source;
     }
+}
+
+static bool signalk_should_drop_udp(const signalk_data_t *data) {
+    if (g_signalk_state.config.transport_mode != SIGNALK_TRANSPORT_BOTH) {
+        return false;
+    }
+
+    int64_t now_ms = signalk_now_ms();
+    for (int i = 0; i < g_signalk_state.data_cache_count; i++) {
+        if (strcmp(g_signalk_state.data_cache[i].data.path, data->path) == 0) {
+            if (g_signalk_state.data_cache[i].source == SIGNALK_SOURCE_WS &&
+                (now_ms - g_signalk_state.data_cache[i].last_update_ms) < SIGNALK_DUPLICATE_WINDOW_MS) {
+                return true;
+            }
+            return false;
+        }
+    }
+
+    return false;
 }
 
 static void signalk_fire_callbacks(const signalk_data_t *data) {
@@ -268,10 +316,26 @@ static void signalk_handle_delta(cJSON *json) {
             strncpy(data.source_label, source_label, sizeof(data.source_label) - 1);
 
             signalk_parse_value(value_item, &data);
-            signalk_update_cache(&data);
+            signalk_update_cache(&data, SIGNALK_SOURCE_WS);
             signalk_fire_callbacks(&data);
         }
     }
+}
+
+static void signalk_udp_data_cb(const signalk_data_t *data, void *user_ctx) {
+    (void)user_ctx;
+    if (!data) {
+        return;
+    }
+
+    if (signalk_should_drop_udp(data)) {
+        return;
+    }
+
+    signalk_update_cache(data, SIGNALK_SOURCE_UDP);
+    signalk_fire_callbacks(data);
+    g_signalk_state.status.messages_received++;
+    g_signalk_state.status.last_message_time = signalk_now_ms();
 }
 
 // --- Subscription helpers ---
@@ -466,6 +530,15 @@ static esp_err_t signalk_ws_start(void) {
     return esp_websocket_client_start(g_signalk_state.ws_client);
 }
 
+static esp_err_t signalk_udp_start_from_config(void) {
+    signalk_udp_config_t cfg = {0};
+    strncpy(cfg.target_ip, g_signalk_state.config.udp_target_ip, sizeof(cfg.target_ip) - 1);
+    cfg.target_ip[sizeof(cfg.target_ip) - 1] = '\0';
+    cfg.broadcast_port = g_signalk_state.config.udp_broadcast_port;
+    cfg.listen_port = g_signalk_state.config.udp_listen_port;
+    return signalk_udp_start(&cfg);
+}
+
 // --- Main client task ---
 
 static void signalk_client_task(void *pvParameters) {
@@ -479,13 +552,26 @@ static void signalk_client_task(void *pvParameters) {
     while (1) {
         int64_t now_ms = signalk_now_ms();
 
+        bool ws_enabled = signalk_ws_enabled(&g_signalk_state.config);
+        bool udp_enabled = signalk_udp_enabled(&g_signalk_state.config);
+        bool udp_running = signalk_udp_is_running();
+
         if (!g_signalk_state.config.enabled) {
             g_signalk_state.status.state = SIGNALK_STATE_DISABLED;
             g_signalk_state.status.authenticated = false;
             g_signalk_state.status.error_message[0] = '\0';
+        } else if (!ws_enabled) {
+            g_signalk_state.status.authenticated = true;
+            g_signalk_state.status.error_message[0] = '\0';
+            if (udp_enabled && udp_running) {
+                g_signalk_state.status.state = SIGNALK_STATE_CONNECTED;
+            } else {
+                g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+            }
         } else {
             if (!g_signalk_state.ws_connected) {
-                g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+                g_signalk_state.status.state =
+                    (udp_enabled && udp_running) ? SIGNALK_STATE_CONNECTED : SIGNALK_STATE_DISCONNECTED;
             }
 
             if (g_signalk_state.config.hostname[0] == '\0') {
@@ -493,7 +579,11 @@ static void signalk_client_task(void *pvParameters) {
                          sizeof(g_signalk_state.status.error_message),
                          "Hostname not set");
             } else if (g_signalk_state.config.token[0] == '\0') {
-                g_signalk_state.status.state = SIGNALK_STATE_AUTH_PENDING;
+                if (!(udp_enabled && udp_running)) {
+                    g_signalk_state.status.state = SIGNALK_STATE_AUTH_PENDING;
+                } else {
+                    g_signalk_state.status.state = SIGNALK_STATE_CONNECTED;
+                }
                 g_signalk_state.status.authenticated = false;
 
                 if (!auth_pending && now_ms >= next_request_ms) {
@@ -636,6 +726,9 @@ esp_err_t signalk_client_init(void) {
         return ESP_ERR_NO_MEM;
     }
 
+    signalk_udp_init();
+    signalk_udp_set_rx_callback(signalk_udp_data_cb, NULL);
+
     g_signalk_state.initialized = true;
     ESP_LOGI(TAG, "SignalK client initialized");
 
@@ -660,6 +753,15 @@ esp_err_t signalk_client_start(void) {
 
     ESP_LOGI(TAG, "Starting SignalK client");
     g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
+
+    if (signalk_udp_enabled(&g_signalk_state.config)) {
+        esp_err_t udp_err = signalk_udp_start_from_config();
+        if (udp_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to start UDP transport");
+        }
+    } else {
+        signalk_udp_stop();
+    }
 
     BaseType_t result = xTaskCreate(
         signalk_client_task,
@@ -687,6 +789,7 @@ esp_err_t signalk_client_stop(void) {
 
     signalk_ws_stop();
     signalk_ws_reset_reconnect();
+    signalk_udp_stop();
 
     g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
     return ESP_OK;
@@ -723,13 +826,31 @@ esp_err_t signalk_set_config(const signalk_config_t *config) {
         previous.use_ssl != config->use_ssl ||
         strcmp(previous.token, config->token) != 0;
 
-    if (server_changed) {
+    bool udp_changed =
+        strcmp(previous.udp_target_ip, config->udp_target_ip) != 0 ||
+        previous.udp_broadcast_port != config->udp_broadcast_port ||
+        previous.udp_listen_port != config->udp_listen_port;
+
+    bool enabled_changed = previous.enabled != config->enabled;
+    bool transport_changed = previous.transport_mode != config->transport_mode;
+
+    if (server_changed || !signalk_ws_enabled(config)) {
         signalk_ws_stop();
         signalk_ws_reset_reconnect();
     }
 
-    // If connection state changes, restart client
-    if (config->enabled != g_signalk_state.config.enabled) {
+    if (!config->enabled) {
+        signalk_udp_stop();
+    } else if (signalk_udp_enabled(config)) {
+        if (udp_changed || transport_changed || !signalk_udp_is_running()) {
+            signalk_udp_stop();
+            signalk_udp_start_from_config();
+        }
+    } else {
+        signalk_udp_stop();
+    }
+
+    if (enabled_changed) {
         if (config->enabled) {
             signalk_client_start();
         } else {
@@ -749,11 +870,7 @@ esp_err_t signalk_get_status(signalk_status_t *status) {
     return ESP_OK;
 }
 
-esp_err_t signalk_send_data(const signalk_data_t *data) {
-    if (!data) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
+static esp_err_t signalk_send_ws_data(const signalk_data_t *data) {
     if (!g_signalk_state.ws_connected) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -822,8 +939,35 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
         return ESP_FAIL;
     }
 
-    g_signalk_state.status.messages_sent++;
     return ESP_OK;
+}
+
+esp_err_t signalk_send_data(const signalk_data_t *data) {
+    if (!data) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    bool ws_ok = false;
+    if (signalk_ws_enabled(&g_signalk_state.config)) {
+        if (signalk_send_ws_data(data) == ESP_OK) {
+            ws_ok = true;
+        }
+    }
+
+    if (ws_ok) {
+        g_signalk_state.status.messages_sent++;
+        return ESP_OK;
+    }
+
+    if (signalk_udp_enabled(&g_signalk_state.config) && signalk_udp_is_running()) {
+        esp_err_t err = signalk_udp_send(data);
+        if (err == ESP_OK) {
+            g_signalk_state.status.messages_sent++;
+        }
+        return err;
+    }
+
+    return ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t signalk_subscribe(const char *path, uint32_t period_ms) {
@@ -916,8 +1060,8 @@ esp_err_t signalk_get_cached_value(const char *path, signalk_data_t *data) {
     }
 
     for (int i = 0; i < g_signalk_state.data_cache_count; i++) {
-        if (strcmp(g_signalk_state.data_cache[i].path, path) == 0) {
-            memcpy(data, &g_signalk_state.data_cache[i], sizeof(signalk_data_t));
+        if (strcmp(g_signalk_state.data_cache[i].data.path, path) == 0) {
+            memcpy(data, &g_signalk_state.data_cache[i].data, sizeof(signalk_data_t));
             return ESP_OK;
         }
     }

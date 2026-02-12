@@ -5,8 +5,53 @@
 #include "cJSON.h"
 #include "esp_log.h"
 #include <string.h>
+#include <strings.h>
 
 static const char *TAG = "signalk_api";
+
+static const char *signalk_transport_mode_name(signalk_transport_mode_t mode) {
+    switch (mode) {
+        case SIGNALK_TRANSPORT_WS:
+            return "ws";
+        case SIGNALK_TRANSPORT_UDP:
+            return "udp";
+        case SIGNALK_TRANSPORT_BOTH:
+            return "both";
+        default:
+            return "ws";
+    }
+}
+
+static signalk_transport_mode_t signalk_transport_mode_from_json(cJSON *item,
+                                                                 signalk_transport_mode_t fallback) {
+    if (!item) {
+        return fallback;
+    }
+
+    if (cJSON_IsNumber(item)) {
+        int val = item->valueint;
+        if (val == (int)SIGNALK_TRANSPORT_UDP) {
+            return SIGNALK_TRANSPORT_UDP;
+        }
+        if (val == (int)SIGNALK_TRANSPORT_BOTH) {
+            return SIGNALK_TRANSPORT_BOTH;
+        }
+        return SIGNALK_TRANSPORT_WS;
+    }
+
+    if (cJSON_IsString(item) && item->valuestring) {
+        const char *s = item->valuestring;
+        if (strcasecmp(s, "udp") == 0) {
+            return SIGNALK_TRANSPORT_UDP;
+        }
+        if (strcasecmp(s, "both") == 0 || strcasecmp(s, "ws+udp") == 0) {
+            return SIGNALK_TRANSPORT_BOTH;
+        }
+        return SIGNALK_TRANSPORT_WS;
+    }
+
+    return fallback;
+}
 
 // ============================================================================
 // GET /api/signalk/status - Get connection status
@@ -70,9 +115,14 @@ static esp_err_t signalk_config_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "enabled", config.enabled);
     cJSON_AddBoolToObject(root, "auto_discovery", config.auto_discovery);
+    cJSON_AddStringToObject(root, "transport_mode",
+        signalk_transport_mode_name(config.transport_mode));
     cJSON_AddStringToObject(root, "hostname", config.hostname);
     cJSON_AddNumberToObject(root, "port", config.port);
     cJSON_AddBoolToObject(root, "use_ssl", config.use_ssl);
+    cJSON_AddStringToObject(root, "udp_target_ip", config.udp_target_ip);
+    cJSON_AddNumberToObject(root, "udp_broadcast_port", config.udp_broadcast_port);
+    cJSON_AddNumberToObject(root, "udp_listen_port", config.udp_listen_port);
     cJSON_AddStringToObject(root, "vessel_name", config.vessel_name);
 
     char *response = cJSON_PrintUnformatted(root);
@@ -130,6 +180,10 @@ static esp_err_t signalk_config_set_handler(httpd_req_t *req) {
         config.auto_discovery = cJSON_IsTrue(item);
     }
 
+    if ((item = cJSON_GetObjectItem(json, "transport_mode"))) {
+        config.transport_mode = signalk_transport_mode_from_json(item, config.transport_mode);
+    }
+
 
     if ((item = cJSON_GetObjectItem(json, "hostname")) && cJSON_IsString(item)) {
         strncpy(config.hostname, item->valuestring, sizeof(config.hostname) - 1);
@@ -143,6 +197,18 @@ static esp_err_t signalk_config_set_handler(httpd_req_t *req) {
         config.use_ssl = cJSON_IsTrue(item);
     }
 
+    if ((item = cJSON_GetObjectItem(json, "udp_target_ip")) && cJSON_IsString(item)) {
+        strncpy(config.udp_target_ip, item->valuestring, sizeof(config.udp_target_ip) - 1);
+        config.udp_target_ip[sizeof(config.udp_target_ip) - 1] = '\0';
+    }
+
+    if ((item = cJSON_GetObjectItem(json, "udp_broadcast_port")) && cJSON_IsNumber(item)) {
+        config.udp_broadcast_port = (uint16_t)item->valueint;
+    }
+
+    if ((item = cJSON_GetObjectItem(json, "udp_listen_port")) && cJSON_IsNumber(item)) {
+        config.udp_listen_port = (uint16_t)item->valueint;
+    }
 
     if ((item = cJSON_GetObjectItem(json, "vessel_name")) && cJSON_IsString(item)) {
         strncpy(config.vessel_name, item->valuestring, sizeof(config.vessel_name) - 1);
