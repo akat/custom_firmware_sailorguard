@@ -110,6 +110,15 @@ esp_err_t signalk_register_callback(const char *path_filter,
  */
 esp_err_t signalk_get_cached_value(const char *path, signalk_data_t *data);
 
+/**
+ * @brief Get list of active subscriptions
+ * @param subs Output array
+ * @param max Maximum entries to return
+ * @param count Output: number of entries written
+ * @return ESP_OK on success
+ */
+esp_err_t signalk_get_subscriptions(signalk_subscription_t *subs, size_t max, size_t *count);
+
 #ifdef __cplusplus
 }
 #endif

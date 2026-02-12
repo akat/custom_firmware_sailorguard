@@ -15,7 +15,10 @@
       "Bash(where:*)",
       "Bash(cmd /c:*)",
       "Bash(C:Usersakatsaris.platformiopenvScriptspio.exe run -e esp32dev)",
-      "WebFetch(domain:signalk.org)"
+      "WebFetch(domain:signalk.org)",
+      "Bash(pio run:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run build:esp:*)"
     ]
   }
 }

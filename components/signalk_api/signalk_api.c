@@ -335,6 +335,73 @@ static esp_err_t signalk_test_handler(httpd_req_t *req) {
 }
 
 // ============================================================================
+// GET /api/signalk/subscriptions - Get subscriptions with cached values
+// ============================================================================
+static esp_err_t signalk_subscriptions_handler(httpd_req_t *req) {
+    signalk_subscription_t subs[8];
+    size_t count = 0;
+    signalk_get_subscriptions(subs, 8, &count);
+
+    cJSON *root = cJSON_CreateArray();
+    for (size_t i = 0; i < count; i++) {
+        cJSON *entry = cJSON_CreateObject();
+        cJSON_AddStringToObject(entry, "path", subs[i].path);
+        cJSON_AddNumberToObject(entry, "period_ms", subs[i].period_ms);
+
+        signalk_data_t data;
+        if (signalk_get_cached_value(subs[i].path, &data) == ESP_OK) {
+            switch (data.type) {
+                case SIGNALK_VALUE_FLOAT:
+                    cJSON_AddNumberToObject(entry, "value", (double)data.value.f);
+                    cJSON_AddStringToObject(entry, "type", "float");
+                    break;
+                case SIGNALK_VALUE_INT:
+                    cJSON_AddNumberToObject(entry, "value", data.value.i);
+                    cJSON_AddStringToObject(entry, "type", "int");
+                    break;
+                case SIGNALK_VALUE_BOOL:
+                    cJSON_AddBoolToObject(entry, "value", data.value.b);
+                    cJSON_AddStringToObject(entry, "type", "bool");
+                    break;
+                case SIGNALK_VALUE_STRING:
+                    cJSON_AddStringToObject(entry, "value", data.value.s);
+                    cJSON_AddStringToObject(entry, "type", "string");
+                    break;
+                case SIGNALK_VALUE_POSITION: {
+                    cJSON *pos = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(pos, "latitude", data.value.pos.latitude);
+                    cJSON_AddNumberToObject(pos, "longitude", data.value.pos.longitude);
+                    if (data.value.pos.altitude != 0.0) {
+                        cJSON_AddNumberToObject(pos, "altitude", data.value.pos.altitude);
+                    }
+                    cJSON_AddItemToObject(entry, "value", pos);
+                    cJSON_AddStringToObject(entry, "type", "position");
+                    break;
+                }
+                default:
+                    cJSON_AddNullToObject(entry, "value");
+                    cJSON_AddStringToObject(entry, "type", "null");
+                    break;
+            }
+            cJSON_AddStringToObject(entry, "source", data.source_label);
+        } else {
+            cJSON_AddNullToObject(entry, "value");
+            cJSON_AddStringToObject(entry, "type", "null");
+        }
+
+        cJSON_AddItemToArray(root, entry);
+    }
+
+    char *response = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t result = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    free(response);
+    return result;
+}
+
+// ============================================================================
 // Register all endpoints
 // ============================================================================
 static void register_uri_or_log(httpd_handle_t server, httpd_uri_t *uri, const char *name) {
@@ -416,6 +483,14 @@ void signalk_api_register(httpd_handle_t server) {
         .handler = signalk_test_handler,
     };
     register_uri_or_log(server, &test_uri, "signalk test");
+
+    // Subscriptions + cached values
+    httpd_uri_t subs_uri = {
+        .uri = "/api/signalk/subscriptions",
+        .method = HTTP_GET,
+        .handler = signalk_subscriptions_handler,
+    };
+    register_uri_or_log(server, &subs_uri, "signalk subscriptions");
 
     ESP_LOGI(TAG, "SignalK API endpoints registered");
 }

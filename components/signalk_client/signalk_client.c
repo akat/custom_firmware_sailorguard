@@ -925,6 +925,23 @@ esp_err_t signalk_get_cached_value(const char *path, signalk_data_t *data) {
     return ESP_ERR_NOT_FOUND;
 }
 
+esp_err_t signalk_get_subscriptions(signalk_subscription_t *subs, size_t max, size_t *count) {
+    if (!subs || !count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t n = g_signalk_state.subscription_count;
+    if (n > max) {
+        n = max;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        memcpy(&subs[i], &g_signalk_state.subscriptions[i], sizeof(signalk_subscription_t));
+    }
+    *count = n;
+    return ESP_OK;
+}
+
 esp_err_t signalk_connect(const char *hostname, uint16_t port) {
     if (!hostname) {
         return ESP_ERR_INVALID_ARG;
