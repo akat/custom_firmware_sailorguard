@@ -12,3 +12,11 @@ idf_component_register(
     PRIV_REQUIRES esp_event
                   freertos
 )
+
+# Try to link WebSocket client if available (optional)
+if(COMPONENT_FOUND)
+    idf_component_get_property(websocket_lib esp_websocket_client COMPONENT_LIB QUIET)
+    if(websocket_lib)
+        target_link_libraries(${COMPONENT_LIB} PUBLIC ${websocket_lib})
+    endif()
+endif()

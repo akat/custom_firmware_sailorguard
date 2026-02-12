@@ -47,6 +47,15 @@ esp_err_t signalk_unsubscribe(const char *path);
 esp_err_t signalk_subscriber_init(void);
 
 /**
+ * @brief Start polling task for subscriptions (call after WiFi connected)
+ * @return ESP_OK on success
+ * 
+ * This should be called AFTER WiFi is connected to avoid failed HTTP requests.
+ * Automatically called by signalk_client when connection is established.
+ */
+esp_err_t signalk_start_polling_task(void);
+
+/**
  * @brief Handle incoming delta message (internal, called by WebSocket handler)
  * @param delta cJSON object containing Signal K delta message
  */

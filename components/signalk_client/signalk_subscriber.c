@@ -17,6 +17,9 @@
 
 static const char *TAG = "signalk_sub";
 
+// Forward declarations
+static void signalk_polling_task(void *pvParameters);
+
 // Maximum number of subscriptions
 #define MAX_SUBSCRIPTIONS 16
 
@@ -26,12 +29,15 @@ typedef struct {
     signalk_subscribe_callback_t callback;
     void *user_data;
     uint32_t period_ms;
+    int64_t last_poll_ms;
+    signalk_data_t last_value;
     bool active;
 } subscription_entry_t;
 
 // Global subscription table
 static subscription_entry_t g_subscriptions[MAX_SUBSCRIPTIONS] = {0};
 static SemaphoreHandle_t g_sub_mutex = NULL;
+static TaskHandle_t g_poll_task = NULL;
 
 esp_err_t signalk_get_json(const char *path, char *json_out, size_t max_len) {
     if (!path || !json_out || max_len == 0) {
@@ -184,7 +190,101 @@ esp_err_t signalk_subscriber_init(void) {
             return ESP_ERR_NO_MEM;
         }
     }
+    
+    // Note: polling task NOT started here - wait for WiFi connection
+    // Use signalk_start_polling_task() after WiFi connects
+    
     return ESP_OK;
+}
+
+// Start polling task (call after WiFi connected)
+esp_err_t signalk_start_polling_task(void) {
+#if SIGNALK_WS_AVAILABLE == 0
+    if (!g_poll_task) {
+        BaseType_t result = xTaskCreate(
+            signalk_polling_task,
+            "signalk_poll",
+            16384,  // 16KB for HTTP operations + JSON parsing
+            NULL,
+            3,
+            &g_poll_task
+        );
+        if (result != pdPASS) {
+            ESP_LOGW(TAG, "Failed to create polling task");
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGI(TAG, "Started polling task for subscriptions");
+        return ESP_OK;
+    }
+    return ESP_OK;  // Already running
+#else
+    ESP_LOGI(TAG, "WebSocket available - polling task not needed");
+    return ESP_OK;
+#endif
+}
+
+// Background polling task (HTTP polling fallback when WebSocket unavailable)
+static void signalk_polling_task(void *pvParameters) {
+    (void)pvParameters;
+    
+    while (1) {
+        int64_t now_ms = (int64_t)xTaskGetTickCount() * (int64_t)portTICK_PERIOD_MS;
+        
+        if (xSemaphoreTake(g_sub_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        
+        // Poll each active subscription
+        for (int i = 0; i < MAX_SUBSCRIPTIONS; i++) {
+            if (!g_subscriptions[i].active) {
+                continue;
+            }
+            
+            // Check if it's time to poll this subscription
+            if (now_ms < g_subscriptions[i].last_poll_ms + (int64_t)g_subscriptions[i].period_ms) {
+                continue;
+            }
+            
+            // Poll the value
+            signalk_data_t new_value = {0};
+            if (signalk_read_value(g_subscriptions[i].path, &new_value) == ESP_OK) {
+                g_subscriptions[i].last_poll_ms = now_ms;
+                
+                // Check if value changed (simple comparison)
+                bool changed = false;
+                if (new_value.type != g_subscriptions[i].last_value.type) {
+                    changed = true;
+                } else if (new_value.type == SIGNALK_VALUE_FLOAT && 
+                           new_value.value.f != g_subscriptions[i].last_value.value.f) {
+                    changed = true;
+                } else if (new_value.type == SIGNALK_VALUE_INT && 
+                           new_value.value.i != g_subscriptions[i].last_value.value.i) {
+                    changed = true;
+                } else if (new_value.type == SIGNALK_VALUE_BOOL && 
+                           new_value.value.b != g_subscriptions[i].last_value.value.b) {
+                    changed = true;
+                }
+                
+                // Call callback if changed
+                if (changed && g_subscriptions[i].callback) {
+                    g_subscriptions[i].last_value = new_value;
+                    
+                    // Release mutex during callback to avoid deadlock
+                    xSemaphoreGive(g_sub_mutex);
+                    g_subscriptions[i].callback(g_subscriptions[i].path, &new_value, 
+                                               g_subscriptions[i].user_data);
+                    if (xSemaphoreTake(g_sub_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        xSemaphoreGive(g_sub_mutex);
+        vTaskDelay(pdMS_TO_TICKS(100));  // Poll check every 100ms
+    }
 }
 
 // Subscribe to a Signal K path
