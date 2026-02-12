@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #if __has_include("esp_websocket_client.h")
 #include "esp_websocket_client.h"
@@ -57,6 +58,16 @@ static inline esp_err_t esp_websocket_client_register_event(esp_websocket_client
     (void)event_handler;
     (void)event_handler_arg;
     return ESP_ERR_NOT_SUPPORTED;
+}
+static inline int esp_websocket_client_send_text(esp_websocket_client_handle_t client,
+                                                 const char *data,
+                                                 int len,
+                                                 TickType_t timeout) {
+    (void)client;
+    (void)data;
+    (void)len;
+    (void)timeout;
+    return -1;
 }
 #define SIGNALK_WS_AVAILABLE 0
 #endif
@@ -159,6 +170,22 @@ static void signalk_ws_event_handler(void *handler_args,
             g_signalk_state.status.messages_received++;
             g_signalk_state.status.last_message_time = signalk_now_ms();
             g_signalk_state.status.state = SIGNALK_STATE_STREAMING;
+
+            // Parse JSON delta
+            char *json_str = malloc(data->data_len + 1);
+            if (json_str) {
+                memcpy(json_str, data->data_ptr, data->data_len);
+                json_str[data->data_len] = '\0';
+
+                cJSON *root = cJSON_Parse(json_str);
+                if (root) {
+                    // Handle delta message
+                    extern void signalk_subscriber_handle_delta(cJSON *delta);
+                    signalk_subscriber_handle_delta(root);
+                    cJSON_Delete(root);
+                }
+                free(json_str);
+            }
         }
         return;
     }
@@ -329,14 +356,22 @@ static void signalk_client_task(void *pvParameters) {
                 g_signalk_state.status.error_message[0] = '\0';
                 auth_pending = false;
 
+                // Update server info
+                strncpy(g_signalk_state.status.server.hostname,
+                        g_signalk_state.config.hostname,
+                        sizeof(g_signalk_state.status.server.hostname) - 1);
+                g_signalk_state.status.server.port = g_signalk_state.config.port;
+                g_signalk_state.status.server.ssl_enabled = g_signalk_state.config.use_ssl;
+
                 if (!g_signalk_state.ws_connected) {
                     if (g_signalk_state.next_reconnect_ms == 0 ||
                         now_ms >= g_signalk_state.next_reconnect_ms) {
                         esp_err_t err = signalk_ws_start();
                         if (err != ESP_OK) {
                             if (err == ESP_ERR_NOT_SUPPORTED) {
-                                ESP_LOGI(TAG, "WebSocket streaming disabled - component not available");
-                                // Don't retry if WebSocket is not supported
+                                // WebSocket not available, but HTTP API works
+                                g_signalk_state.status.state = SIGNALK_STATE_CONNECTED;
+                                ESP_LOGI(TAG, "Connected via HTTP (WebSocket not available)");
                                 g_signalk_state.next_reconnect_ms = INT64_MAX;
                             } else {
                                 ESP_LOGW(TAG, "WebSocket connection failed: %s", esp_err_to_name(err));
@@ -345,6 +380,9 @@ static void signalk_client_task(void *pvParameters) {
                         } else {
                             signalk_ws_reset_reconnect();
                         }
+                    } else {
+                        // Waiting to retry WebSocket, but still connected via HTTP
+                        g_signalk_state.status.state = SIGNALK_STATE_CONNECTED;
                     }
                 }
             }
@@ -570,8 +608,11 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
 
     // Set headers
     char auth_header[600];
-    snprintf(auth_header, sizeof(auth_header), "Bearer %.512s", g_signalk_state.config.token);
-    esp_http_client_set_header(client, "Authorization", auth_header);
+    int header_len = snprintf(auth_header, sizeof(auth_header) - 1, "Bearer %s", g_signalk_state.config.token);
+    if (header_len > 0 && header_len < (int)sizeof(auth_header)) {
+        auth_header[header_len] = '\0';
+        esp_http_client_set_header(client, "Authorization", auth_header);
+    }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, payload, strlen(payload));
 
@@ -635,4 +676,82 @@ esp_err_t signalk_test_connection(const char *hostname, uint16_t port) {
     // HTTP GET /signalk/v1 to test
     // Implementation in HTTP client phase
     return ESP_OK;
+}
+
+// WebSocket subscription functions
+esp_err_t signalk_ws_subscribe(const char *path, uint32_t period_ms) {
+#if SIGNALK_WS_AVAILABLE == 0
+    ESP_LOGW(TAG, "WebSocket not available for subscriptions");
+    return ESP_ERR_NOT_SUPPORTED;
+#else
+    if (!g_signalk_state.ws_client || !g_signalk_state.ws_connected) {
+        ESP_LOGW(TAG, "WebSocket not connected");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Build subscription message
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "context", "vessels.self");
+    
+    cJSON *subscribe = cJSON_CreateArray();
+    cJSON *sub_item = cJSON_CreateObject();
+    cJSON_AddStringToObject(sub_item, "path", path);
+    cJSON_AddNumberToObject(sub_item, "period", period_ms);
+    cJSON_AddStringToObject(sub_item, "format", "delta");
+    cJSON_AddStringToObject(sub_item, "policy", "instant");
+    cJSON_AddItemToArray(subscribe, sub_item);
+    cJSON_AddItemToObject(root, "subscribe", subscribe);
+
+    char *msg = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!msg) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "Sending subscription: %s", msg);
+    
+    int sent = esp_websocket_client_send_text(g_signalk_state.ws_client, 
+                                              msg, strlen(msg), 
+                                              pdMS_TO_TICKS(5000));
+    free(msg);
+
+    return (sent > 0) ? ESP_OK : ESP_FAIL;
+#endif
+}
+
+esp_err_t signalk_ws_unsubscribe(const char *path) {
+#if SIGNALK_WS_AVAILABLE == 0
+    return ESP_ERR_NOT_SUPPORTED;
+#else
+    if (!g_signalk_state.ws_client || !g_signalk_state.ws_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Build unsubscribe message
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "context", "vessels.self");
+    
+    cJSON *unsubscribe = cJSON_CreateArray();
+    cJSON *unsub_item = cJSON_CreateObject();
+    cJSON_AddStringToObject(unsub_item, "path", path);
+    cJSON_AddItemToArray(unsubscribe, unsub_item);
+    cJSON_AddItemToObject(root, "unsubscribe", unsubscribe);
+
+    char *msg = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!msg) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "Sending unsubscribe: %s", msg);
+    
+    int sent = esp_websocket_client_send_text(g_signalk_state.ws_client, 
+                                              msg, strlen(msg), 
+                                              pdMS_TO_TICKS(5000));
+    free(msg);
+
+    return (sent > 0) ? ESP_OK : ESP_FAIL;
+#endif
 }
