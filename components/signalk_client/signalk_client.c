@@ -1000,22 +1000,68 @@ static esp_err_t http_delta_event_handler(esp_http_client_event_t *evt) {
     return ESP_OK;
 }
 
+// Convert dotted SignalK path to URL path segments: "a.b.c" → "a/b/c"
+static void signalk_path_to_url(const char *dotted, char *out, size_t out_len) {
+    size_t i = 0;
+    while (*dotted && i < out_len - 1) {
+        out[i++] = (*dotted == '.') ? '/' : *dotted;
+        dotted++;
+    }
+    out[i] = '\0';
+}
+
 static esp_err_t signalk_send_http_delta(const signalk_data_t *data) {
     if (g_signalk_state.config.hostname[0] == '\0') {
         return ESP_ERR_INVALID_STATE;
     }
 
-    char *payload = signalk_build_delta_json(data);
+    // Build value-only JSON body for PUT
+    cJSON *body = cJSON_CreateObject();
+    switch (data->type) {
+        case SIGNALK_VALUE_NULL:
+            cJSON_AddNullToObject(body, "value");
+            break;
+        case SIGNALK_VALUE_BOOL:
+            cJSON_AddBoolToObject(body, "value", data->value.b);
+            break;
+        case SIGNALK_VALUE_INT:
+            cJSON_AddNumberToObject(body, "value", data->value.i);
+            break;
+        case SIGNALK_VALUE_FLOAT:
+            cJSON_AddNumberToObject(body, "value", (double)data->value.f);
+            break;
+        case SIGNALK_VALUE_STRING:
+            cJSON_AddStringToObject(body, "value", data->value.s);
+            break;
+        case SIGNALK_VALUE_POSITION: {
+            cJSON *pos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pos, "latitude", data->value.pos.latitude);
+            cJSON_AddNumberToObject(pos, "longitude", data->value.pos.longitude);
+            if (data->value.pos.altitude != 0.0) {
+                cJSON_AddNumberToObject(pos, "altitude", data->value.pos.altitude);
+            }
+            cJSON_AddItemToObject(body, "value", pos);
+            break;
+        }
+    }
+
+    char *payload = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
     if (!payload) {
         return ESP_ERR_NO_MEM;
     }
 
-    char url[256];
+    // Build URL: /signalk/v1/api/vessels/self/sensors/akat/anchor/state
+    char path_segments[256];
+    signalk_path_to_url(data->path, path_segments, sizeof(path_segments));
+
+    char url[512];
     const char *scheme = g_signalk_state.config.use_ssl ? "https" : "http";
-    snprintf(url, sizeof(url), "%s://%s:%d/signalk/v1/api/",
+    snprintf(url, sizeof(url), "%s://%s:%d/signalk/v1/api/vessels/self/%s",
              scheme,
              g_signalk_state.config.hostname,
-             g_signalk_state.config.port);
+             g_signalk_state.config.port,
+             path_segments);
 
     esp_http_client_config_t cfg = {
         .url = url,
@@ -1029,7 +1075,7 @@ static esp_err_t signalk_send_http_delta(const signalk_data_t *data) {
         return ESP_ERR_NO_MEM;
     }
 
-    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_method(client, HTTP_METHOD_PUT);
     esp_http_client_set_header(client, "Content-Type", "application/json");
 
     if (g_signalk_state.config.token[0] != '\0') {
@@ -1045,11 +1091,11 @@ static esp_err_t signalk_send_http_delta(const signalk_data_t *data) {
     if (err == ESP_OK) {
         int status = esp_http_client_get_status_code(client);
         if (status < 200 || status >= 300) {
-            ESP_LOGW(TAG, "HTTP delta POST returned %d", status);
+            ESP_LOGW(TAG, "HTTP PUT %s returned %d", data->path, status);
             err = ESP_FAIL;
         }
     } else {
-        ESP_LOGW(TAG, "HTTP delta POST failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "HTTP PUT %s failed: %s", data->path, esp_err_to_name(err));
     }
 
     esp_http_client_cleanup(client);
@@ -1074,15 +1120,7 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
         }
     }
 
-    // Fallback: send via HTTP POST (reliable, works with UDP-only or WS fallback)
-    if (g_signalk_state.config.hostname[0] != '\0') {
-        if (signalk_send_http_delta(data) == ESP_OK) {
-            g_signalk_state.status.messages_sent++;
-            return ESP_OK;
-        }
-    }
-
-    // Last resort: send via UDP broadcast
+    // Fallback: send via UDP delta (SignalK providers use WS or UDP, not HTTP)
     if (signalk_udp_enabled(&g_signalk_state.config) && signalk_udp_is_running()) {
         esp_err_t err = signalk_udp_send(data);
         if (err == ESP_OK) {
