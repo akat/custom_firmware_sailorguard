@@ -2,6 +2,7 @@
 #include "config_api.h"
 #include "signalk_client.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
@@ -13,6 +14,8 @@
 #include <strings.h>
 #include <string.h>
 #include <time.h>
+
+#define SAFETY_DISCONNECT_DEBOUNCE_MS 3000
 
 static const char *TAG = "anchor_guard";
 static const char *ANCHOR_NVS_NS = "anchor_guard";
@@ -48,6 +51,8 @@ typedef struct {
     bool enabled;
     float default_chain_seconds;
     int neutral_ms;
+    int status_led_pin;
+    bool status_led_active_high;
 
     int chain_sensor_pin;
     bool chain_sensor_pullup;
@@ -118,6 +123,8 @@ typedef struct {
     uint32_t last_save_check_ms;
     uint32_t last_heartbeat_ms;
     uint32_t connection_start_ms;
+
+    uint32_t disconnect_since_ms;  // 0 = connected, >0 = timestamp of first disconnect
 } anchor_runtime_t;
 
 typedef enum {
@@ -200,6 +207,14 @@ static void load_default_config(anchor_config_t *cfg) {
     cfg->enabled = true;
     cfg->default_chain_seconds = 5.0f;
     cfg->neutral_ms = 400;
+#ifdef LED_BUILTIN
+    cfg->status_led_pin = LED_BUILTIN;
+#elif defined(CONFIG_IDF_TARGET_ESP32)
+    cfg->status_led_pin = 2;
+#else
+    cfg->status_led_pin = -1;
+#endif
+    cfg->status_led_active_high = true;
 
     cfg->chain_sensor_pin = 25;
     cfg->chain_sensor_pullup = true;
@@ -228,6 +243,8 @@ static void load_config(anchor_config_t *cfg) {
     cfg->enabled = config_get_bool_or_default("enabled", cfg->enabled);
     cfg->default_chain_seconds = config_get_float_or_default("default_chain_seconds", cfg->default_chain_seconds);
     cfg->neutral_ms = config_get_int_or_default("neutral_ms", cfg->neutral_ms);
+    cfg->status_led_pin = config_get_int_or_default("status_led_pin", cfg->status_led_pin);
+    cfg->status_led_active_high = config_get_bool_or_default("status_led_active_high", cfg->status_led_active_high);
 
     cfg->chain_sensor_pin = config_get_int_or_default("chain_sensor_pin", cfg->chain_sensor_pin);
     cfg->chain_sensor_pullup = config_get_bool_or_default("chain_sensor_pullup", cfg->chain_sensor_pullup);
@@ -250,15 +267,67 @@ static void load_config(anchor_config_t *cfg) {
     cfg->beep_on_direction = parse_beep_dir(dir_buf);
 }
 
+static inline float clamp_f(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static inline int clamp_i(int v, int lo, int hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static void validate_config(anchor_config_t *cfg) {
+    if (cfg->chain_calibration <= 0.0f) {
+        ESP_LOGW(TAG, "chain_calibration <= 0 (%.3f), clamping to 1.0",
+                 cfg->chain_calibration);
+        cfg->chain_calibration = 1.0f;
+    }
+    cfg->chain_calibration = clamp_f(cfg->chain_calibration, 0.001f, 100.0f);
+    cfg->neutral_ms = clamp_i(cfg->neutral_ms, 0, 5000);
+    cfg->pulse_debounce_ms = clamp_i(cfg->pulse_debounce_ms, 10, 1000);
+    cfg->ext_input_debounce_ms = clamp_i(cfg->ext_input_debounce_ms, 10, 1000);
+    cfg->default_chain_seconds = clamp_f(cfg->default_chain_seconds, 0.5f, 3600.0f);
+    cfg->base_threshold_m = clamp_f(cfg->base_threshold_m, 1.0f, 500.0f);
+    cfg->step_m = clamp_f(cfg->step_m, 1.0f, 100.0f);
+    cfg->hysteresis_m = clamp_f(cfg->hysteresis_m, 0.0f, 10.0f);
+
+    // Validate GPIO pins: -1 = disabled, 0-48 valid range for ESP32-S3
+    if (cfg->relay_up_pin < -1 || cfg->relay_up_pin > 48) {
+        ESP_LOGW(TAG, "Invalid relay_up_pin %d, disabling", cfg->relay_up_pin);
+        cfg->relay_up_pin = -1;
+    }
+    if (cfg->relay_down_pin < -1 || cfg->relay_down_pin > 48) {
+        ESP_LOGW(TAG, "Invalid relay_down_pin %d, disabling", cfg->relay_down_pin);
+        cfg->relay_down_pin = -1;
+    }
+    if (cfg->chain_sensor_pin < -1 || cfg->chain_sensor_pin > 48) {
+        ESP_LOGW(TAG, "Invalid chain_sensor_pin %d, disabling", cfg->chain_sensor_pin);
+        cfg->chain_sensor_pin = -1;
+    }
+    if (cfg->ext_up_gpio < -1 || cfg->ext_up_gpio > 48) {
+        cfg->ext_up_gpio = -1;
+    }
+    if (cfg->ext_down_gpio < -1 || cfg->ext_down_gpio > 48) {
+        cfg->ext_down_gpio = -1;
+    }
+}
+
 static void save_chain_to_nvs(float meters) {
     nvs_handle_t handle;
-    if (nvs_open(ANCHOR_NVS_NS, NVS_READWRITE, &handle) != ESP_OK) {
+    esp_err_t err = nvs_open(ANCHOR_NVS_NS, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS open failed: %s", esp_err_to_name(err));
         return;
     }
     char buf[32];
     snprintf(buf, sizeof(buf), "%.3f", meters);
-    nvs_set_str(handle, "chain_meters", buf);
-    nvs_commit(handle);
+    err = nvs_set_str(handle, "chain_meters", buf);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS write chain_meters failed: %s", esp_err_to_name(err));
+    }
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS commit failed: %s", esp_err_to_name(err));
+    }
     nvs_close(handle);
 }
 
@@ -304,6 +373,14 @@ static void relay_down_on(void) {
     relay_set(false, true);
 }
 
+static void status_led_set(bool on) {
+    if (g_cfg.status_led_pin < 0) {
+        return;
+    }
+    int level = g_cfg.status_led_active_high ? (on ? 1 : 0) : (on ? 0 : 1);
+    gpio_set_level(g_cfg.status_led_pin, level);
+}
+
 static void setup_output_pin(int pin) {
     gpio_config_t cfg = {
         .pin_bit_mask = 1ULL << pin,
@@ -333,6 +410,10 @@ static void setup_pins(void) {
     setup_output_pin(g_cfg.relay_up_pin);
     setup_output_pin(g_cfg.relay_down_pin);
     relay_off();
+    if (g_cfg.status_led_pin >= 0) {
+        setup_output_pin(g_cfg.status_led_pin);
+        status_led_set(false);
+    }
 
     if (g_cfg.chain_sensor_pin >= 0) {
         setup_input_pin(g_cfg.chain_sensor_pin, g_cfg.chain_sensor_pullup, !g_cfg.chain_sensor_pullup);
@@ -598,6 +679,7 @@ static void external_publish_state(void) {
 
 static void stop_now(const char *reason) {
     relay_off();
+    status_led_set(false);
     g_rt.state = RUN_IDLE;
     g_rt.op_end_ms = 0;
     g_rt.op_start_ms = 0;
@@ -613,10 +695,12 @@ static void start_run(run_state_t dir, float seconds) {
 
     if (dir == RUN_UP) {
         relay_up_on();
+        status_led_set(true);
         g_rt.state = RUN_UP;
         ESP_LOGI(TAG, "Motor START: UP for %.1fs", seconds);
     } else if (dir == RUN_DOWN) {
         relay_down_on();
+        status_led_set(true);
         g_rt.state = RUN_DOWN;
         ESP_LOGI(TAG, "Motor START: DOWN for %.1fs", seconds);
     }
@@ -651,6 +735,7 @@ static void run_direction(run_state_t dir, float seconds) {
     if ((dir == RUN_UP && g_rt.state == RUN_DOWN) ||
         (dir == RUN_DOWN && g_rt.state == RUN_UP)) {
         relay_off();
+        status_led_set(false);
         g_rt.neutral_waiting = true;
         g_rt.neutral_until_ms = now + (uint32_t)g_cfg.neutral_ms;
         g_rt.queued_dir = dir;
@@ -805,9 +890,19 @@ static void anchor_tick(void) {
 
     if (!is_signalk_connected()) {
         if ((g_rt.state == RUN_UP || g_rt.state == RUN_DOWN) && !g_external.external_active) {
-            stop_now("safety:disconnected");
-            return;
+            uint32_t t = now_ms();
+            if (g_rt.disconnect_since_ms == 0) {
+                g_rt.disconnect_since_ms = t;
+                ESP_LOGW(TAG, "SignalK disconnected while running, debouncing...");
+            } else if ((t - g_rt.disconnect_since_ms) >= SAFETY_DISCONNECT_DEBOUNCE_MS) {
+                ESP_LOGE(TAG, "Safety stop: SignalK disconnected for %lums",
+                         (unsigned long)(t - g_rt.disconnect_since_ms));
+                stop_now("safety:disconnected");
+                return;
+            }
         }
+    } else {
+        g_rt.disconnect_since_ms = 0;
     }
 
     external_state_t prev_state = g_external.state;
@@ -852,7 +947,12 @@ static void anchor_task(void *arg) {
     anchor_cmd_t cmd;
     uint32_t last_config_check_ms = 0;
 
+    // Subscribe to task watchdog
+    esp_task_wdt_add(NULL);
+
     while (1) {
+        esp_task_wdt_reset();
+
         while (xQueueReceive(g_cmd_queue, &cmd, 0) == pdTRUE) {
             if (should_process_signalk()) {
                 handle_command(&cmd);
@@ -864,10 +964,20 @@ static void anchor_task(void *arg) {
             last_config_check_ms = now;
             anchor_config_t next_cfg;
             load_config(&next_cfg);
+            validate_config(&next_cfg);
             if (memcmp(&next_cfg, &g_cfg, sizeof(g_cfg)) != 0) {
                 bool was_enabled = g_cfg.enabled;
+                bool pins_changed =
+                    next_cfg.relay_up_pin != g_cfg.relay_up_pin ||
+                    next_cfg.relay_down_pin != g_cfg.relay_down_pin ||
+                    next_cfg.chain_sensor_pin != g_cfg.chain_sensor_pin ||
+                    next_cfg.ext_up_gpio != g_cfg.ext_up_gpio ||
+                    next_cfg.ext_down_gpio != g_cfg.ext_down_gpio ||
+                    next_cfg.status_led_pin != g_cfg.status_led_pin;
                 g_cfg = next_cfg;
-                setup_pins();
+                if (pins_changed) {
+                    setup_pins();
+                }
                 g_chain.chain_pulse_count = (int)(g_chain.chain_out_meters / g_cfg.chain_calibration);
                 if (!g_cfg.enabled && was_enabled) {
                     stop_now("config:disable");
@@ -925,36 +1035,23 @@ static void signalk_cb(const signalk_data_t *data, void *user_ctx) {
     }
 
     if (g_cmd_queue) {
-        xQueueSend(g_cmd_queue, &cmd, 0);
+        if (xQueueSend(g_cmd_queue, &cmd, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "Command queue full, dropping command for path: %s", data->path);
+        }
     }
 }
 
 static void subscribe_paths(void) {
+    // Only subscribe to INBOUND command paths (paths we receive commands on).
+    // Do NOT subscribe to paths we send data on - that creates a feedback loop
+    // where SignalK echoes our own data back, generating spurious commands.
     signalk_subscribe(SK_CMD_PATH, 1000);
-    signalk_subscribe(SK_CHAIN_PATH, 1000);
     signalk_subscribe(SK_RESET_PATH, 1000);
-
-    static const char *monitor_paths[] = {
-        "sensors.akat.anchor.state",
-        "sensors.akat.anchor.chainOut",
-        "sensors.akat.anchor.chainPulses",
-        "sensors.akat.anchor.enabled",
-        "sensors.akat.anchor.lastUpdate",
-        "sensors.akat.anchor.externalControl.active",
-        "sensors.akat.anchor.externalControl.source",
-        "sensors.akat.anchor.alert.buzzerEvent",
-        "sensors.akat.anchor.alert.lastThreshold",
-        "sensors.akat.anchor.alert.lastBeeps",
-        "sensors.akat.anchor.alert.firedAt"
-    };
-
-    for (size_t i = 0; i < sizeof(monitor_paths) / sizeof(monitor_paths[0]); i++) {
-        signalk_subscribe(monitor_paths[i], 1000);
-    }
 }
 
 esp_err_t anchor_guard_init(void) {
     load_config(&g_cfg);
+    validate_config(&g_cfg);
     setup_pins();
 
     memset(&g_chain, 0, sizeof(g_chain));
@@ -967,7 +1064,7 @@ esp_err_t anchor_guard_init(void) {
     memset(&g_rt, 0, sizeof(g_rt));
     g_rt.state = RUN_IDLE;
 
-    g_cmd_queue = xQueueCreate(8, sizeof(anchor_cmd_t));
+    g_cmd_queue = xQueueCreate(16, sizeof(anchor_cmd_t));
     if (!g_cmd_queue) {
         return ESP_ERR_NO_MEM;
     }
@@ -975,7 +1072,7 @@ esp_err_t anchor_guard_init(void) {
     signalk_register_callback("sensors.akat.anchor", signalk_cb, NULL);
     subscribe_paths();
 
-    BaseType_t res = xTaskCreate(anchor_task, "anchor_guard", 4096, NULL, 4, &g_anchor_task);
+    BaseType_t res = xTaskCreate(anchor_task, "anchor_guard", 6144, NULL, 4, &g_anchor_task);
     if (res != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

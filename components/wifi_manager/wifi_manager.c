@@ -3,7 +3,10 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_event.h"
+#include "esp_system.h"
 #include "esp_log.h"
 #include "esp_netif_ip_addr.h"
 #include "esp_timer.h"
@@ -30,6 +33,10 @@ static bool s_scanning = false;
 static uint32_t s_ap_fallback_ms = 15000;
 static bool s_sntp_started = false;
 
+#define WIFI_MAX_CONSECUTIVE_FAILURES 100
+static int s_consecutive_wifi_failures = 0;
+static bool s_ever_connected = false;
+
 static char s_ap_ssid[33] = {0};
 static char s_ap_password[65] = {0};
 static char s_sta_ssid[33] = {0};
@@ -41,11 +48,19 @@ static char s_pending_pass[65] = {0};
 
 static void nvs_save_string(const char *key, const char *value) {
     nvs_handle_t handle;
-    if (nvs_open(k_nvs_ns, NVS_READWRITE, &handle) != ESP_OK) {
+    esp_err_t err = nvs_open(k_nvs_ns, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS open failed for '%s': %s", key, esp_err_to_name(err));
         return;
     }
-    nvs_set_str(handle, key, value);
-    nvs_commit(handle);
+    err = nvs_set_str(handle, key, value);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS write '%s' failed: %s", key, esp_err_to_name(err));
+    }
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS commit failed: %s", esp_err_to_name(err));
+    }
     nvs_close(handle);
 }
 
@@ -156,6 +171,22 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             s_pending_ssid[0] = '\0';
             s_pending_pass[0] = '\0';
         }
+
+        // Watchdog: only count failures after we've connected at least once
+        // (avoids restarting on first boot with no network)
+        if (s_ever_connected) {
+            s_consecutive_wifi_failures++;
+            if (s_consecutive_wifi_failures % 10 == 1) {
+                ESP_LOGW(TAG, "WiFi STA disconnect #%d/%d",
+                         s_consecutive_wifi_failures, WIFI_MAX_CONSECUTIVE_FAILURES);
+            }
+            if (s_consecutive_wifi_failures >= WIFI_MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGE(TAG, "WiFi watchdog: %d consecutive failures, restarting...",
+                         WIFI_MAX_CONSECUTIVE_FAILURES);
+                esp_restart();
+            }
+        }
+
         // Don't auto-reconnect while scanning
         if (!s_scanning) {
             esp_wifi_connect();
@@ -169,6 +200,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             snprintf(s_sta_ssid, sizeof(s_sta_ssid), "%s", (char *)config.sta.ssid);
         }
         s_sta_connected = true;
+        s_ever_connected = true;
+        s_consecutive_wifi_failures = 0;
         update_sta_ip();
         cancel_ap_fallback();
         start_sntp();
@@ -276,6 +309,8 @@ esp_err_t wifi_manager_scan(wifi_ap_record_t *records, uint16_t *count) {
     s_scanning = true;
     if (!s_sta_connected) {
         esp_wifi_disconnect();
+        // Let the WiFi state machine settle after disconnect
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 
     uint8_t primary = 0;
@@ -299,6 +334,12 @@ esp_err_t wifi_manager_scan(wifi_ap_record_t *records, uint16_t *count) {
     };
 
     esp_err_t err = esp_wifi_scan_start(&scan_config, true);
+
+    // Retry once if WiFi was still in a transitional state
+    if (err == ESP_ERR_WIFI_STATE) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        err = esp_wifi_scan_start(&scan_config, true);
+    }
 
     uint16_t ap_num = 0;
     if (err == ESP_OK) {

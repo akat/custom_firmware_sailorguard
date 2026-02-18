@@ -4,6 +4,8 @@
 #include "signalk_auth.h"
 #include "signalk_udp.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -122,6 +124,9 @@ static struct {
     // Server hello
     char self_context[128];
     bool hello_received;
+
+    // WebSocket watchdog
+    int ws_consecutive_failures;
 } g_signalk_state = {
     .initialized = false,
     .client_task = NULL,
@@ -135,6 +140,8 @@ static struct {
 // Forward declarations
 extern esp_err_t signalk_storage_load_config(signalk_config_t *config);
 extern esp_err_t signalk_storage_save_config(const signalk_config_t *config);
+
+#define WS_MAX_CONSECUTIVE_FAILURES 10
 
 static int64_t signalk_now_ms(void) {
     return (int64_t)xTaskGetTickCount() * (int64_t)portTICK_PERIOD_MS;
@@ -410,6 +417,7 @@ static void signalk_ws_event_handler(void *handler_args,
 
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         g_signalk_state.ws_connected = true;
+        g_signalk_state.ws_consecutive_failures = 0;  // Reset watchdog
         g_signalk_state.hello_received = false;
         g_signalk_state.subscriptions_sent = false;
         g_signalk_state.status.state = SIGNALK_STATE_CONNECTED;
@@ -428,12 +436,17 @@ static void signalk_ws_event_handler(void *handler_args,
         g_signalk_state.ws_connected = false;
         g_signalk_state.hello_received = false;
         g_signalk_state.subscriptions_sent = false;
+        g_signalk_state.ws_consecutive_failures++;
         g_signalk_state.status.state = SIGNALK_STATE_DISCONNECTED;
-        strncpy(g_signalk_state.status.error_message,
-                "WebSocket disconnected",
-                sizeof(g_signalk_state.status.error_message) - 1);
+        snprintf(g_signalk_state.status.error_message,
+                 sizeof(g_signalk_state.status.error_message),
+                 "WebSocket disconnected (%d/%d)",
+                 g_signalk_state.ws_consecutive_failures,
+                 WS_MAX_CONSECUTIVE_FAILURES);
         signalk_ws_schedule_reconnect(signalk_now_ms());
-        ESP_LOGW(TAG, "WebSocket disconnected");
+        ESP_LOGW(TAG, "WebSocket disconnected #%d/%d",
+                 g_signalk_state.ws_consecutive_failures,
+                 WS_MAX_CONSECUTIVE_FAILURES);
         return;
     }
 
@@ -478,12 +491,17 @@ static void signalk_ws_event_handler(void *handler_args,
 
     if (event_id == WEBSOCKET_EVENT_ERROR) {
         g_signalk_state.ws_connected = false;
+        g_signalk_state.ws_consecutive_failures++;
         g_signalk_state.status.state = SIGNALK_STATE_ERROR;
-        strncpy(g_signalk_state.status.error_message,
-                "WebSocket error",
-                sizeof(g_signalk_state.status.error_message) - 1);
+        snprintf(g_signalk_state.status.error_message,
+                 sizeof(g_signalk_state.status.error_message),
+                 "WebSocket error (%d/%d)",
+                 g_signalk_state.ws_consecutive_failures,
+                 WS_MAX_CONSECUTIVE_FAILURES);
         signalk_ws_schedule_reconnect(signalk_now_ms());
-        ESP_LOGE(TAG, "WebSocket error");
+        ESP_LOGE(TAG, "WebSocket error #%d/%d",
+                 g_signalk_state.ws_consecutive_failures,
+                 WS_MAX_CONSECUTIVE_FAILURES);
     }
 }
 
@@ -513,7 +531,9 @@ static esp_err_t signalk_ws_start(void) {
         .uri = g_signalk_state.ws_url,
         .headers = g_signalk_state.ws_headers,
         .buffer_size = 2048,
-        .disable_auto_reconnect = true
+        .disable_auto_reconnect = true,
+        .ping_interval_sec = 15,
+        .pingpong_timeout_sec = 30,
     };
 
     g_signalk_state.ws_client = esp_websocket_client_init(&cfg);
@@ -544,12 +564,16 @@ static esp_err_t signalk_udp_start_from_config(void) {
 static void signalk_client_task(void *pvParameters) {
     ESP_LOGI(TAG, "SignalK client task started");
 
+    // Subscribe to task watchdog
+    esp_task_wdt_add(NULL);
+
     signalk_auth_request_t auth_request = {0};
     bool auth_pending = false;
     int64_t next_request_ms = 0;
     int64_t next_poll_ms = 0;
 
     while (1) {
+        esp_task_wdt_reset();
         int64_t now_ms = signalk_now_ms();
 
         bool ws_enabled = signalk_ws_enabled(&g_signalk_state.config);
@@ -664,9 +688,20 @@ static void signalk_client_task(void *pvParameters) {
                         now_ms >= g_signalk_state.next_reconnect_ms) {
                         esp_err_t err = signalk_ws_start();
                         if (err != ESP_OK) {
+                            g_signalk_state.ws_consecutive_failures++;
+                            ESP_LOGW(TAG, "WebSocket connect failed #%d/%d",
+                                     g_signalk_state.ws_consecutive_failures,
+                                     WS_MAX_CONSECUTIVE_FAILURES);
+                            if (g_signalk_state.ws_consecutive_failures >= WS_MAX_CONSECUTIVE_FAILURES) {
+                                ESP_LOGE(TAG, "WebSocket watchdog: %d consecutive failures, restarting...",
+                                         WS_MAX_CONSECUTIVE_FAILURES);
+                                esp_restart();
+                            }
                             snprintf(g_signalk_state.status.error_message,
                                      sizeof(g_signalk_state.status.error_message),
-                                     "WebSocket connect failed");
+                                     "WebSocket connect failed (%d/%d)",
+                                     g_signalk_state.ws_consecutive_failures,
+                                     WS_MAX_CONSECUTIVE_FAILURES);
                             signalk_ws_schedule_reconnect(now_ms);
                         } else {
                             signalk_ws_reset_reconnect();
@@ -957,6 +992,10 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
     if (!data) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    // Cache outbound data locally so the dashboard can display it
+    // without needing to subscribe and receive echoes from the server
+    signalk_update_cache(data, SIGNALK_SOURCE_WS);
 
     bool ws_ok = false;
     if (signalk_ws_enabled(&g_signalk_state.config)) {

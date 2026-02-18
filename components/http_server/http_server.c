@@ -68,6 +68,7 @@ static esp_err_t static_file_handler(httpd_req_t *req) {
     }
 
     httpd_resp_set_type(req, content_type_from_path(filepath));
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
 
     char buffer[1024];
     size_t read_bytes;
@@ -89,6 +90,7 @@ httpd_handle_t start_http_server(const char *base_path, esp_netif_t *ap_netif) {
     config.max_uri_handlers = 256;  // Increased to accommodate all API handlers + static
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 6144;
+    config.max_open_sockets = 3;    // Reduced from default 7 to avoid socket exhaustion
 
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) {

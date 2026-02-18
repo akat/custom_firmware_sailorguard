@@ -4,47 +4,9 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "cJSON.h"
 
 #include "wifi_manager.h"
-
-static const char *TAG = "wifi_api";
-
-static bool json_get_string(const char *json, const char *key, char *out, size_t out_len) {
-    if (!json || !key || !out || out_len == 0) {
-        return false;
-    }
-
-    char pattern[64];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *pos = strstr(json, pattern);
-    if (!pos) {
-        return false;
-    }
-
-    pos = strchr(pos + strlen(pattern), ':');
-    if (!pos) {
-        return false;
-    }
-
-    pos = strchr(pos, '"');
-    if (!pos) {
-        return false;
-    }
-
-    pos++;
-    const char *end = strchr(pos, '"');
-    if (!end) {
-        return false;
-    }
-
-    size_t len = (size_t)(end - pos);
-    if (len >= out_len) {
-        len = out_len - 1;
-    }
-    memcpy(out, pos, len);
-    out[len] = '\0';
-    return true;
-}
 
 static const char *auth_to_str(wifi_auth_mode_t auth) {
     switch (auth) {
@@ -114,12 +76,26 @@ static esp_err_t wifi_config_handler(httpd_req_t *req) {
     }
     buffer[received] = '\0';
 
-    char ssid[33] = {0};
-    char password[65] = {0};
-    if (!json_get_string(buffer, "ssid", ssid, sizeof(ssid))) {
+    cJSON *json = cJSON_Parse(buffer);
+    if (!json) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
+    }
+
+    const cJSON *ssid_item = cJSON_GetObjectItemCaseSensitive(json, "ssid");
+    if (!cJSON_IsString(ssid_item) || ssid_item->valuestring[0] == '\0') {
+        cJSON_Delete(json);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing ssid");
     }
-    json_get_string(buffer, "password", password, sizeof(password));
+
+    char ssid[33] = {0};
+    char password[65] = {0};
+    strncpy(ssid, ssid_item->valuestring, sizeof(ssid) - 1);
+
+    const cJSON *pass_item = cJSON_GetObjectItemCaseSensitive(json, "password");
+    if (cJSON_IsString(pass_item) && pass_item->valuestring) {
+        strncpy(password, pass_item->valuestring, sizeof(password) - 1);
+    }
+    cJSON_Delete(json);
 
     esp_err_t err = wifi_manager_connect(ssid, password, true);
     if (err != ESP_OK) {
@@ -131,7 +107,7 @@ static esp_err_t wifi_config_handler(httpd_req_t *req) {
 }
 
 static esp_err_t wifi_scan_handler(httpd_req_t *req) {
-    wifi_ap_record_t records[8];
+    wifi_ap_record_t records[20];
     uint16_t count = (uint16_t)(sizeof(records) / sizeof(records[0]));
 
     esp_err_t err = wifi_manager_scan(records, &count);
@@ -139,13 +115,36 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan failed");
     }
 
-    char *payload = malloc(512);
+    /* Deduplicate by SSID, keeping the entry with the strongest RSSI */
+    uint16_t unique = 0;
+    for (uint16_t i = 0; i < count; ++i) {
+        const char *ssid = (const char *)records[i].ssid;
+        bool duplicate = false;
+        for (uint16_t j = 0; j < unique; ++j) {
+            if (strcmp(ssid, (const char *)records[j].ssid) == 0) {
+                if (records[i].rssi > records[j].rssi) {
+                    records[j] = records[i];
+                }
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            if (unique != i) {
+                records[unique] = records[i];
+            }
+            unique++;
+        }
+    }
+    count = unique;
+
+    char *payload = malloc(2048);
     if (!payload) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
     }
 
     size_t offset = 0;
-    offset += snprintf(payload + offset, 512 - offset, "{\"networks\":[");
+    offset += snprintf(payload + offset, 2048 - offset, "{\"networks\":[");
 
     for (uint16_t i = 0; i < count; ++i) {
         const char *ssid = (const char *)records[i].ssid;
@@ -153,20 +152,20 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req) {
         int rssi = records[i].rssi;
         offset += snprintf(
             payload + offset,
-            512 - offset,
+            2048 - offset,
             "%s{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":\"%s\"}",
             i == 0 ? "" : ",",
             ssid,
             rssi,
             auth);
-        if (offset >= 512) {
+        if (offset >= 2048) {
             free(payload);
             return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan overflow");
         }
     }
 
-    offset += snprintf(payload + offset, 512 - offset, "]}");
-    if (offset >= 512) {
+    offset += snprintf(payload + offset, 2048 - offset, "]}");
+    if (offset >= 2048) {
         free(payload);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan overflow");
     }
@@ -200,14 +199,28 @@ static esp_err_t wifi_ap_config_handler(httpd_req_t *req) {
     }
     buffer[received] = '\0';
 
-    char ssid[33] = {0};
-    char password[65] = {0};
-    if (!json_get_string(buffer, "ssid", ssid, sizeof(ssid))) {
+    cJSON *json = cJSON_Parse(buffer);
+    if (!json) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
+    }
+
+    const cJSON *ssid_item = cJSON_GetObjectItemCaseSensitive(json, "ssid");
+    if (!cJSON_IsString(ssid_item) || ssid_item->valuestring[0] == '\0') {
+        cJSON_Delete(json);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing ssid");
     }
-    if (!json_get_string(buffer, "password", password, sizeof(password))) {
+
+    const cJSON *pass_item = cJSON_GetObjectItemCaseSensitive(json, "password");
+    if (!cJSON_IsString(pass_item) || !pass_item->valuestring) {
+        cJSON_Delete(json);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing password");
     }
+
+    char ssid[33] = {0};
+    char password[65] = {0};
+    strncpy(ssid, ssid_item->valuestring, sizeof(ssid) - 1);
+    strncpy(password, pass_item->valuestring, sizeof(password) - 1);
+    cJSON_Delete(json);
 
     esp_err_t err = wifi_manager_set_ap_config(ssid, password);
     if (err != ESP_OK) {

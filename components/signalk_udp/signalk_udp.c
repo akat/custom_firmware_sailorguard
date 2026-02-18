@@ -1,6 +1,7 @@
 #include "signalk_udp.h"
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
@@ -146,7 +147,10 @@ static void signalk_udp_task(void *arg) {
         return;
     }
 
+    esp_task_wdt_add(NULL);
+
     while (g_udp.running) {
+        esp_task_wdt_reset();
         struct sockaddr_in from_addr;
         socklen_t from_len = sizeof(from_addr);
 
@@ -171,6 +175,7 @@ static void signalk_udp_task(void *arg) {
         cJSON_Delete(json);
     }
 
+    esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
 

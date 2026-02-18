@@ -3,5 +3,5 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES json
              signalk_types
-    PRIV_REQUIRES freertos lwip
+    PRIV_REQUIRES freertos lwip esp_system
 )

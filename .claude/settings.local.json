@@ -18,7 +18,9 @@
       "WebFetch(domain:signalk.org)",
       "Bash(pio run:*)",
       "Bash(npm run build:*)",
-      "Bash(npm run build:esp:*)"
+      "Bash(npm run build:esp:*)",
+      "Bash(~/.platformio/penv/Scripts/pio run -e esp32s3box)",
+      "Bash(~/.platformio/penv/Scripts/pio run:*)"
     ]
   }
 }
