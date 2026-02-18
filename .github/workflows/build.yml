@@ -1,0 +1,74 @@
+name: Build Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [esp32s3box, esp32dev]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build:esp
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Build SPIFFS image
+        run: pio run -e ${{ matrix.env }} -t buildfs
+
+      - name: Rename artifacts
+        run: |
+          cp .pio/build/${{ matrix.env }}/firmware.bin firmware-${{ matrix.env }}.bin
+          cp .pio/build/${{ matrix.env }}/spiffs.bin spiffs-${{ matrix.env }}.bin
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}
+          path: |
+            firmware-${{ matrix.env }}.bin
+            spiffs-${{ matrix.env }}.bin
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            firmware-*.bin
+            spiffs-*.bin

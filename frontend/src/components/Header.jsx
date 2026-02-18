@@ -37,6 +37,12 @@ export default function Header({ view, onNavigate }) {
         >
           Signal K
         </button>
+        <button
+          class={`menu-button ${view === "device" ? "active" : ""}`}
+          onClick={() => onNavigate("device")}
+        >
+          Device
+        </button>
       </nav>
     </header>
   );

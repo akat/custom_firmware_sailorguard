@@ -13,6 +13,7 @@
 #include "signalk_client.h"
 #include "signalk_api.h"
 #include "anchor_guard.h"
+#include "device_api.h"
 
 static const char *TAG = "app";
 
@@ -72,6 +73,9 @@ void app_main(void) {
 
 	// Initialize anchor guard controller
 	anchor_guard_init();
+
+	// Register device management API (reboot, OTA, info)
+	device_api_register(server);
 
 	// Register static file handler AFTER all API handlers
 	http_server_register_static(server, "/spiffs");

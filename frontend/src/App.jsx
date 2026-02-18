@@ -3,6 +3,7 @@ import DashboardView from "./views/DashboardView.jsx";
 import WifiSettingsView from "./views/WifiSettingsView.jsx";
 import ConfigView from "./views/ConfigView.jsx";
 import SignalKView from "./views/SignalKView.jsx";
+import DeviceView from "./views/DeviceView.jsx";
 import MainLayout from "./templates/MainLayout.jsx";
 import { getRoute, setRoute, subscribeRouteChange } from "./utils/router.js";
 
@@ -297,6 +298,9 @@ export default function App() {
       )}
       {view === "signalk" && (
         <SignalKView />
+      )}
+      {view === "device" && (
+        <DeviceView />
       )}
     </MainLayout>
   );
