@@ -3,31 +3,9 @@
   "description": "Windlass, chain counter, and alert settings.",
   "sections": [
     {
-      "title": "Relay & Motor",
-      "description": "Windlass relay GPIOs and motor behavior.",
+      "title": "Motor Control",
+      "description": "Windlass behavior. Pins are fixed: IO26=power, IO27=direction (LOW=UP, HIGH=DOWN).",
       "fields": [
-        {
-          "key": "relay_up_pin",
-          "label": "Relay UP GPIO",
-          "type": "gpio",
-          "default": 26,
-          "min": 0,
-          "max": 39
-        },
-        {
-          "key": "relay_down_pin",
-          "label": "Relay DOWN GPIO",
-          "type": "gpio",
-          "default": 27,
-          "min": 0,
-          "max": 39
-        },
-        {
-          "key": "relay_act_high",
-          "label": "Relays Active HIGH",
-          "type": "bool",
-          "default": true
-        },
         {
           "key": "enabled",
           "label": "Enabled",
@@ -35,42 +13,35 @@
           "default": true
         },
         {
-          "key": "def_chain_sec",
-          "label": "Default Seconds",
-          "type": "number",
-          "default": 5,
-          "min": 0,
-          "max": 3600,
-          "help": "Default run time when a direction is pressed."
-        },
-        {
           "key": "neutral_ms",
           "label": "Neutral Delay (ms)",
           "type": "number",
           "default": 400,
           "min": 0,
-          "max": 5000
+          "max": 5000,
+          "help": "Dead-time between direction changes to protect the H-bridge."
         },
         {
-          "key": "status_led_pin",
-          "label": "Status LED GPIO",
-          "type": "gpio",
-          "default": 2,
-          "min": -1,
-          "max": 39,
-          "help": "Onboard status LED pin (-1 to disable)."
-        },
-        {
-          "key": "led_act_high",
-          "label": "Status LED Active HIGH",
+          "key": "ff_use_meters",
+          "label": "Freefall by Meters",
           "type": "bool",
-          "default": true
+          "default": false,
+          "help": "When enabled, freefall releases chain by meters instead of time."
+        },
+        {
+          "key": "ff_value",
+          "label": "Freefall Value",
+          "type": "number",
+          "default": 5,
+          "min": 0.5,
+          "max": 200,
+          "help": "Seconds (if by time) or meters of chain (if by meters)."
         }
       ]
     },
     {
       "title": "Chain Counter",
-      "description": "Chain sensor and calibration.",
+      "description": "Chain sensor and calibration. Sensor pin is configurable; all other hardware is fixed.",
       "fields": [
         {
           "key": "chain_sen_pin",
@@ -100,46 +71,22 @@
           "type": "number",
           "default": 150,
           "min": 50,
-          "max": 500
+          "max": 1000
         }
       ]
     },
     {
       "title": "External Inputs",
-      "description": "External relay inputs for remote control.",
+      "description": "Passive sense inputs for direction tracking. Fixed pins: IO16=UP, IO17=DOWN (active HIGH).",
       "fields": [
         {
-          "key": "ext_up_gpio",
-          "label": "External UP GPIO",
-          "type": "gpio",
-          "default": 32,
-          "min": -1,
-          "max": 39,
-          "help": "Input from windlass UP relay (-1 to disable)."
-        },
-        {
-          "key": "ext_down_gpio",
-          "label": "External DOWN GPIO",
-          "type": "gpio",
-          "default": 33,
-          "min": -1,
-          "max": 39,
-          "help": "Input from windlass DOWN relay (-1 to disable)."
-        },
-        {
-          "key": "ext_act_high",
-          "label": "External Input Active High",
-          "type": "bool",
-          "default": false,
-          "help": "false = Active LOW with pull-up (relay closed = LOW)."
-        },
-        {
           "key": "ext_dbnc_ms",
-          "label": "External Input Debounce (ms)",
+          "label": "Debounce (ms)",
           "type": "number",
           "default": 50,
           "min": 10,
-          "max": 250
+          "max": 1000,
+          "help": "Debounce time for external sense inputs."
         }
       ]
     },

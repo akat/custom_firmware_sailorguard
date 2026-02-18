@@ -17,6 +17,13 @@
 
 #define SAFETY_DISCONNECT_DEBOUNCE_MS 3000
 
+/* Fixed hardware pin assignments — not user-configurable. */
+#define MOTOR_EN_PIN    26   /* IO26: motor power (active HIGH)              */
+#define MOTOR_DIR_PIN   27   /* IO27: direction — HIGH = UP, LOW = DOWN      */
+#define EXT_UP_PIN      16   /* IO16: external UP sense (active LOW)         */
+#define EXT_DOWN_PIN    17   /* IO17: external DOWN sense (active LOW)       */
+#define STATUS_LED_PIN   2   /* IO2:  onboard status LED (active HIGH)       */
+
 static const char *TAG = "anchor_guard";
 static const char *ANCHOR_NVS_NS = "anchor_guard";
 
@@ -45,24 +52,18 @@ typedef enum {
 } beep_dir_t;
 
 typedef struct {
-    int relay_up_pin;
-    int relay_down_pin;
-    bool relays_active_high;
     bool enabled;
-    float default_chain_seconds;
     int neutral_ms;
-    int status_led_pin;
-    bool status_led_active_high;
 
     int chain_sensor_pin;
     bool chain_sensor_pullup;
     float chain_calibration;
     int pulse_debounce_ms;
 
-    int ext_up_gpio;
-    int ext_down_gpio;
-    bool ext_input_active_high;
     int ext_input_debounce_ms;
+
+    bool freefall_use_meters;
+    float freefall_value;
 
     float base_threshold_m;
     float step_m;
@@ -92,6 +93,7 @@ typedef struct {
 
 typedef struct {
     external_state_t state;
+    external_state_t last_valid_state;  /* last confirmed UP or DOWN (not CONFLICT/NONE) */
     bool external_active;
     char source[12];
     debounce_t up_db;
@@ -125,6 +127,8 @@ typedef struct {
     uint32_t connection_start_ms;
 
     uint32_t disconnect_since_ms;  // 0 = connected, >0 = timestamp of first disconnect
+
+    float chain_target_meters;     // >0 = stop when chain reaches this value
 } anchor_runtime_t;
 
 typedef enum {
@@ -201,29 +205,17 @@ static const char *beep_dir_to_string(beep_dir_t dir) {
 
 static void load_default_config(anchor_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
-    cfg->relay_up_pin = 26;
-    cfg->relay_down_pin = 27;
-    cfg->relays_active_high = true;
     cfg->enabled = true;
-    cfg->default_chain_seconds = 5.0f;
     cfg->neutral_ms = 400;
-#ifdef LED_BUILTIN
-    cfg->status_led_pin = LED_BUILTIN;
-#elif defined(CONFIG_IDF_TARGET_ESP32)
-    cfg->status_led_pin = 2;
-#else
-    cfg->status_led_pin = -1;
-#endif
-    cfg->status_led_active_high = true;
 
     cfg->chain_sensor_pin = 25;
     cfg->chain_sensor_pullup = true;
     cfg->chain_calibration = 1.0f;
     cfg->pulse_debounce_ms = 150;
 
-    cfg->ext_up_gpio = 32;
-    cfg->ext_down_gpio = 33;
-    cfg->ext_input_active_high = false;
+    cfg->freefall_use_meters = false;
+    cfg->freefall_value = 5.0f;
+
     cfg->ext_input_debounce_ms = 50;
 
     cfg->base_threshold_m = 20.0f;
@@ -237,23 +229,17 @@ static void load_default_config(anchor_config_t *cfg) {
 static void load_config(anchor_config_t *cfg) {
     load_default_config(cfg);
 
-    cfg->relay_up_pin = config_get_int_or_default("relay_up_pin", cfg->relay_up_pin);
-    cfg->relay_down_pin = config_get_int_or_default("relay_down_pin", cfg->relay_down_pin);
-    cfg->relays_active_high = config_get_bool_or_default("relay_act_high", cfg->relays_active_high);
     cfg->enabled = config_get_bool_or_default("enabled", cfg->enabled);
-    cfg->default_chain_seconds = config_get_float_or_default("def_chain_sec", cfg->default_chain_seconds);
     cfg->neutral_ms = config_get_int_or_default("neutral_ms", cfg->neutral_ms);
-    cfg->status_led_pin = config_get_int_or_default("status_led_pin", cfg->status_led_pin);
-    cfg->status_led_active_high = config_get_bool_or_default("led_act_high", cfg->status_led_active_high);
 
     cfg->chain_sensor_pin = config_get_int_or_default("chain_sen_pin", cfg->chain_sensor_pin);
     cfg->chain_sensor_pullup = config_get_bool_or_default("chain_pullup", cfg->chain_sensor_pullup);
     cfg->chain_calibration = config_get_float_or_default("chain_cal", cfg->chain_calibration);
     cfg->pulse_debounce_ms = config_get_int_or_default("pulse_dbnc_ms", cfg->pulse_debounce_ms);
 
-    cfg->ext_up_gpio = config_get_int_or_default("ext_up_gpio", cfg->ext_up_gpio);
-    cfg->ext_down_gpio = config_get_int_or_default("ext_down_gpio", cfg->ext_down_gpio);
-    cfg->ext_input_active_high = config_get_bool_or_default("ext_act_high", cfg->ext_input_active_high);
+    cfg->freefall_use_meters = config_get_bool_or_default("ff_use_meters", cfg->freefall_use_meters);
+    cfg->freefall_value = config_get_float_or_default("ff_value", cfg->freefall_value);
+
     cfg->ext_input_debounce_ms = config_get_int_or_default("ext_dbnc_ms", cfg->ext_input_debounce_ms);
 
     cfg->base_threshold_m = config_get_float_or_default("base_thresh_m", cfg->base_threshold_m);
@@ -285,29 +271,13 @@ static void validate_config(anchor_config_t *cfg) {
     cfg->neutral_ms = clamp_i(cfg->neutral_ms, 0, 5000);
     cfg->pulse_debounce_ms = clamp_i(cfg->pulse_debounce_ms, 10, 1000);
     cfg->ext_input_debounce_ms = clamp_i(cfg->ext_input_debounce_ms, 10, 1000);
-    cfg->default_chain_seconds = clamp_f(cfg->default_chain_seconds, 0.5f, 3600.0f);
     cfg->base_threshold_m = clamp_f(cfg->base_threshold_m, 1.0f, 500.0f);
     cfg->step_m = clamp_f(cfg->step_m, 1.0f, 100.0f);
     cfg->hysteresis_m = clamp_f(cfg->hysteresis_m, 0.0f, 10.0f);
 
-    // Validate GPIO pins: -1 = disabled, 0-48 valid range for ESP32-S3
-    if (cfg->relay_up_pin < -1 || cfg->relay_up_pin > 48) {
-        ESP_LOGW(TAG, "Invalid relay_up_pin %d, disabling", cfg->relay_up_pin);
-        cfg->relay_up_pin = -1;
-    }
-    if (cfg->relay_down_pin < -1 || cfg->relay_down_pin > 48) {
-        ESP_LOGW(TAG, "Invalid relay_down_pin %d, disabling", cfg->relay_down_pin);
-        cfg->relay_down_pin = -1;
-    }
     if (cfg->chain_sensor_pin < -1 || cfg->chain_sensor_pin > 48) {
         ESP_LOGW(TAG, "Invalid chain_sensor_pin %d, disabling", cfg->chain_sensor_pin);
         cfg->chain_sensor_pin = -1;
-    }
-    if (cfg->ext_up_gpio < -1 || cfg->ext_up_gpio > 48) {
-        cfg->ext_up_gpio = -1;
-    }
-    if (cfg->ext_down_gpio < -1 || cfg->ext_down_gpio > 48) {
-        cfg->ext_down_gpio = -1;
     }
 }
 
@@ -354,31 +324,25 @@ static void load_chain_from_nvs(chain_state_t *chain, float calibration) {
     nvs_close(handle);
 }
 
-static void relay_set(bool up_on, bool down_on) {
-    int up_level = g_cfg.relays_active_high ? (up_on ? 1 : 0) : (up_on ? 0 : 1);
-    int down_level = g_cfg.relays_active_high ? (down_on ? 1 : 0) : (down_on ? 0 : 1);
-    gpio_set_level(g_cfg.relay_up_pin, up_level);
-    gpio_set_level(g_cfg.relay_down_pin, down_level);
+static void motor_off(void) {
+    gpio_set_level(MOTOR_EN_PIN, 0);   /* power off  */
+    gpio_set_level(MOTOR_DIR_PIN, 0);  /* direction LOW = DOWN (safe default when disabled) */
 }
 
-static void relay_off(void) {
-    relay_set(false, false);
+static void motor_up_on(void) {
+    gpio_set_level(MOTOR_EN_PIN, 0);   /* 1. disable power first   */
+    gpio_set_level(MOTOR_DIR_PIN, 1);  /* 2. direction: HIGH = UP  */
+    gpio_set_level(MOTOR_EN_PIN, 1);   /* 3. enable power          */
 }
 
-static void relay_up_on(void) {
-    relay_set(true, false);
-}
-
-static void relay_down_on(void) {
-    relay_set(false, true);
+static void motor_down_on(void) {
+    gpio_set_level(MOTOR_EN_PIN, 0);   /* 1. disable power first   */
+    gpio_set_level(MOTOR_DIR_PIN, 0);  /* 2. direction: LOW = DOWN */
+    gpio_set_level(MOTOR_EN_PIN, 1);   /* 3. enable power          */
 }
 
 static void status_led_set(bool on) {
-    if (g_cfg.status_led_pin < 0) {
-        return;
-    }
-    int level = g_cfg.status_led_active_high ? (on ? 1 : 0) : (on ? 0 : 1);
-    gpio_set_level(g_cfg.status_led_pin, level);
+    gpio_set_level(STATUS_LED_PIN, on ? 1 : 0);
 }
 
 static void setup_output_pin(int pin) {
@@ -407,14 +371,16 @@ static void setup_input_pin(int pin, bool pullup, bool pulldown) {
 }
 
 static void setup_pins(void) {
-    setup_output_pin(g_cfg.relay_up_pin);
-    setup_output_pin(g_cfg.relay_down_pin);
-    relay_off();
-    if (g_cfg.status_led_pin >= 0) {
-        setup_output_pin(g_cfg.status_led_pin);
-        status_led_set(false);
-    }
+    /* Motor outputs: IO26 = enable (active HIGH), IO27 = direction (LOW=UP, HIGH=DOWN) */
+    setup_output_pin(MOTOR_EN_PIN);
+    setup_output_pin(MOTOR_DIR_PIN);
+    motor_off();
 
+    /* Status LED: IO2, active HIGH */
+    setup_output_pin(STATUS_LED_PIN);
+    status_led_set(false);
+
+    /* Chain sensor: configurable pin with optional pull-up */
     if (g_cfg.chain_sensor_pin >= 0) {
         setup_input_pin(g_cfg.chain_sensor_pin, g_cfg.chain_sensor_pullup, !g_cfg.chain_sensor_pullup);
         g_chain.last_sensor_state = gpio_get_level(g_cfg.chain_sensor_pin);
@@ -422,8 +388,9 @@ static void setup_pins(void) {
         g_chain.sensor_stable_since_ms = now_ms();
     }
 
-    setup_input_pin(g_cfg.ext_up_gpio, !g_cfg.ext_input_active_high, g_cfg.ext_input_active_high);
-    setup_input_pin(g_cfg.ext_down_gpio, !g_cfg.ext_input_active_high, g_cfg.ext_input_active_high);
+    /* External sense inputs: IO16 = UP, IO17 = DOWN, active LOW (optocoupler open-collector) → pull-up */
+    setup_input_pin(EXT_UP_PIN,   true, false);
+    setup_input_pin(EXT_DOWN_PIN, true, false);
 }
 
 static void sk_send_bool(const char *path, bool value) {
@@ -477,7 +444,31 @@ static const char *state_to_string(run_state_t state) {
     }
 }
 
+/* Returns the run state driven by external sense inputs (passive, no motor control).
+ * During a CONFLICT (both inputs briefly active due to back-EMF / electrical coupling),
+ * falls back to the last confirmed direction so the chain counter keeps working. */
+static run_state_t external_run_state(void) {
+    external_state_t ext = g_external.state;
+    if (ext == EXT_CONFLICT) ext = g_external.last_valid_state;
+    if (ext == EXT_UP)   return RUN_UP;
+    if (ext == EXT_DOWN) return RUN_DOWN;
+    return RUN_IDLE;
+}
+
+/*
+ * Effective state for SK reporting and chain counter direction.
+ * SK-commanded state takes absolute priority.
+ * When SK is idle, external sense fills in the direction
+ * (motor may be running via physical boat switches).
+ */
+static run_state_t effective_run_state(void) {
+    return (g_rt.state != RUN_IDLE) ? g_rt.state : external_run_state();
+}
+
 static void publish_state(void) {
+    /* State reflects the SK-commanded motor state only.
+     * External sense inputs are internal — they drive the chain counter direction
+     * but are never exposed through the main state path. */
     sk_send_string("sensors.akat.anchor.state", state_to_string(g_rt.state));
 }
 
@@ -628,12 +619,6 @@ static void external_debounce_update(debounce_t *db, bool input, uint32_t now, u
     }
 }
 
-static bool external_read_input(int gpio) {
-    if (gpio < 0) return false;
-    int level = gpio_get_level(gpio);
-    return level == (g_cfg.ext_input_active_high ? 1 : 0);
-}
-
 static external_state_t external_update(void) {
     uint32_t now = now_ms();
     if (now - g_external.last_sample_ms < 10) {
@@ -641,23 +626,48 @@ static external_state_t external_update(void) {
     }
     g_external.last_sample_ms = now;
 
-    external_debounce_update(&g_external.up_db, external_read_input(g_cfg.ext_up_gpio),
+    /* Debug: log raw GPIO levels on any change */
+    static int prev_raw_up   = -1;
+    static int prev_raw_down = -1;
+    int raw_up   = gpio_get_level(EXT_UP_PIN);
+    int raw_down = gpio_get_level(EXT_DOWN_PIN);
+    if (raw_up != prev_raw_up || raw_down != prev_raw_down) {
+        ESP_LOGI(TAG, "RAW GPIO: IO16(UP)=%d  IO17(DOWN)=%d", raw_up, raw_down);
+        prev_raw_up   = raw_up;
+        prev_raw_down = raw_down;
+    }
+
+    external_debounce_update(&g_external.up_db, (raw_up == 0),
                              now, (uint32_t)g_cfg.ext_input_debounce_ms);
-    external_debounce_update(&g_external.down_db, external_read_input(g_cfg.ext_down_gpio),
+    external_debounce_update(&g_external.down_db, (raw_down == 0),
                              now, (uint32_t)g_cfg.ext_input_debounce_ms);
 
     external_state_t new_state = EXT_NONE;
     const char *new_source = "NONE";
 
+    /* Hardware encoding (active LOW optocouplers, filtered=true means pin is LOW):
+     *   IO16=0, IO17=0  →  UP   (up_db=true,  down_db=true)
+     *   IO16=1, IO17=0  →  DOWN (up_db=false, down_db=true)
+     *   IO16=1, IO17=1  →  IDLE (up_db=false, down_db=false)
+     *   IO16=0, IO17=1  →  transition, treat as UP */
     if (g_external.up_db.filtered && g_external.down_db.filtered) {
-        new_state = EXT_CONFLICT;
-        new_source = "CONFLICT";
-    } else if (g_external.up_db.filtered) {
+        /* Both LOW = UP */
         new_state = EXT_UP;
         new_source = "UP";
-    } else if (g_external.down_db.filtered) {
+    } else if (!g_external.up_db.filtered && g_external.down_db.filtered) {
+        /* IO16=1, IO17=0 = DOWN */
         new_state = EXT_DOWN;
         new_source = "DOWN";
+    } else if (g_external.up_db.filtered && !g_external.down_db.filtered) {
+        /* IO16=0, IO17=1 = transition, treat as UP */
+        new_state = EXT_UP;
+        new_source = "UP";
+    }
+    /* else: IO16=1, IO17=1 = NONE (already set above) */
+
+    /* Remember the last clean direction so conflict can fall back to it. */
+    if (new_state == EXT_UP || new_state == EXT_DOWN) {
+        g_external.last_valid_state = new_state;
     }
 
     bool state_changed = (g_external.external_active != (new_state != EXT_NONE)) ||
@@ -673,17 +683,21 @@ static external_state_t external_update(void) {
 }
 
 static void external_publish_state(void) {
-    sk_send_bool("sensors.akat.anchor.externalControl.active", g_external.external_active);
-    sk_send_string("sensors.akat.anchor.externalControl.source", g_external.source);
+    /* CONFLICT is a back-EMF / electrical coupling artifact — never expose it.
+     * Only publish when there is a clean, single-direction signal. */
+    bool active = (g_external.state == EXT_UP || g_external.state == EXT_DOWN);
+    sk_send_bool("sensors.akat.anchor.externalControl.active", active);
+    sk_send_string("sensors.akat.anchor.externalControl.source", active ? g_external.source : "NONE");
 }
 
 static void stop_now(const char *reason) {
-    relay_off();
+    motor_off();
     status_led_set(false);
     g_rt.state = RUN_IDLE;
     g_rt.op_end_ms = 0;
     g_rt.op_start_ms = 0;
     g_rt.neutral_waiting = false;
+    g_rt.chain_target_meters = 0.0f;
     g_rt.state_changed = true;
     ESP_LOGI(TAG, "Motor stopped: %s", reason ? reason : "stop");
 }
@@ -694,12 +708,12 @@ static void start_run(run_state_t dir, float seconds) {
     g_rt.op_end_ms = now + (uint32_t)(seconds * 1000.0f);
 
     if (dir == RUN_UP) {
-        relay_up_on();
+        motor_up_on();
         status_led_set(true);
         g_rt.state = RUN_UP;
         ESP_LOGI(TAG, "Motor START: UP for %.1fs", seconds);
     } else if (dir == RUN_DOWN) {
-        relay_down_on();
+        motor_down_on();
         status_led_set(true);
         g_rt.state = RUN_DOWN;
         ESP_LOGI(TAG, "Motor START: DOWN for %.1fs", seconds);
@@ -730,11 +744,11 @@ static void run_direction(run_state_t dir, float seconds) {
     g_rt.last_command_ms = now;
     strncpy(g_rt.last_command_state, current_cmd, sizeof(g_rt.last_command_state) - 1);
 
-    float dur = seconds > 0.0f ? seconds : g_cfg.default_chain_seconds;
+    float dur = seconds;
 
     if ((dir == RUN_UP && g_rt.state == RUN_DOWN) ||
         (dir == RUN_DOWN && g_rt.state == RUN_UP)) {
-        relay_off();
+        motor_off();
         status_led_set(false);
         g_rt.neutral_waiting = true;
         g_rt.neutral_until_ms = now + (uint32_t)g_cfg.neutral_ms;
@@ -836,7 +850,16 @@ static void handle_command(const anchor_cmd_t *cmd) {
         } else if (strcmp(cmd->str, "running_down") == 0) {
             if (g_rt.state != RUN_DOWN) run_direction(RUN_DOWN, 3600.0f);
         } else if (strcmp(cmd->str, "freefall") == 0) {
-            run_direction(RUN_DOWN, 0.0f);
+            if (g_cfg.freefall_use_meters) {
+                /* Run DOWN until chain_out reaches target meters */
+                g_rt.chain_target_meters = g_chain.chain_out_meters + g_cfg.freefall_value;
+                run_direction(RUN_DOWN, 3600.0f);
+                ESP_LOGI(TAG, "Freefall: target %.1fm (current %.1fm + %.1fm)",
+                         g_rt.chain_target_meters, g_chain.chain_out_meters, g_cfg.freefall_value);
+            } else {
+                /* Run DOWN for configured seconds */
+                run_direction(RUN_DOWN, g_cfg.freefall_value);
+            }
         } else if (strcmp(cmd->str, "idle") == 0) {
             if (g_rt.state != RUN_IDLE) stop_now("command:idle");
         } else if (strcmp(cmd->str, "reset_counter") == 0) {
@@ -889,7 +912,8 @@ static void anchor_tick(void) {
     }
 
     if (!is_signalk_connected()) {
-        if ((g_rt.state == RUN_UP || g_rt.state == RUN_DOWN) && !g_external.external_active) {
+        /* Safety stop only for SK-commanded motor runs (motor GPIO is active). */
+        if (g_rt.state == RUN_UP || g_rt.state == RUN_DOWN) {
             uint32_t t = now_ms();
             if (g_rt.disconnect_since_ms == 0) {
                 g_rt.disconnect_since_ms = t;
@@ -905,30 +929,45 @@ static void anchor_tick(void) {
         g_rt.disconnect_since_ms = 0;
     }
 
-    external_state_t prev_state = g_external.state;
+    external_state_t prev_ext = g_external.state;
     external_state_t ext_state = external_update();
-    if (ext_state != prev_state) {
+    if (ext_state != prev_ext) {
         external_publish_state();
-
-        if (ext_state == EXT_CONFLICT) {
-            stop_now("conflict");
-        } else if (ext_state == EXT_UP) {
-            run_direction(RUN_UP, 3600.0f);
-        } else if (ext_state == EXT_DOWN) {
-            run_direction(RUN_DOWN, 3600.0f);
-        } else {
-            stop_now("external_stop");
-        }
+        /*
+         * External sense inputs (IO16=UP, IO17=DOWN) are PASSIVE observers.
+         * They detect when physical boat switches are driving the motor through
+         * the same output path, so the chain counter knows the direction.
+         * Motor GPIO pins (IO26 enable, IO27 direction) are controlled ONLY
+         * by SK delta commands (running_up / running_down / idle).
+         */
+        ESP_LOGI(TAG, "External sense: %s (raw IO16=%d IO17=%d)",
+                 ext_state == EXT_UP ? "UP" : ext_state == EXT_DOWN ? "DOWN" : "NONE",
+                 gpio_get_level(EXT_UP_PIN), gpio_get_level(EXT_DOWN_PIN));
+        /* publish_state() sends g_rt.state only — external changes don't affect it. */
     }
 
     float prev_chain = g_chain.chain_out_meters;
+    /*
+     * Chain counter direction: SK-commanded state takes priority.
+     * When SK is idle, external sense provides the direction so the
+     * chain counter works during physical-switch-driven motor runs.
+     */
     int direction = 0;
-    if (g_rt.state == RUN_DOWN) direction = 1;
-    else if (g_rt.state == RUN_UP) direction = -1;
+    run_state_t eff_state = effective_run_state();
+    if (eff_state == RUN_DOWN) direction = 1;
+    else if (eff_state == RUN_UP) direction = -1;
 
     bool pulsed = chain_update(direction);
     if (pulsed) {
         buzzer_check_thresholds(prev_chain, g_chain.chain_out_meters, direction > 0);
+
+        /* Check chain target (freefall by meters) */
+        if (g_rt.chain_target_meters > 0.0f &&
+            g_rt.state == RUN_DOWN &&
+            g_chain.chain_out_meters >= g_rt.chain_target_meters) {
+            ESP_LOGI(TAG, "Chain target reached: %.1fm", g_chain.chain_out_meters);
+            stop_now("chain_target");
+        }
     }
 
     handle_neutral_queue();
@@ -968,12 +1007,7 @@ static void anchor_task(void *arg) {
             if (memcmp(&next_cfg, &g_cfg, sizeof(g_cfg)) != 0) {
                 bool was_enabled = g_cfg.enabled;
                 bool pins_changed =
-                    next_cfg.relay_up_pin != g_cfg.relay_up_pin ||
-                    next_cfg.relay_down_pin != g_cfg.relay_down_pin ||
-                    next_cfg.chain_sensor_pin != g_cfg.chain_sensor_pin ||
-                    next_cfg.ext_up_gpio != g_cfg.ext_up_gpio ||
-                    next_cfg.ext_down_gpio != g_cfg.ext_down_gpio ||
-                    next_cfg.status_led_pin != g_cfg.status_led_pin;
+                    next_cfg.chain_sensor_pin != g_cfg.chain_sensor_pin;
                 g_cfg = next_cfg;
                 if (pins_changed) {
                     setup_pins();
