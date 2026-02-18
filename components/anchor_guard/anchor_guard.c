@@ -239,30 +239,30 @@ static void load_config(anchor_config_t *cfg) {
 
     cfg->relay_up_pin = config_get_int_or_default("relay_up_pin", cfg->relay_up_pin);
     cfg->relay_down_pin = config_get_int_or_default("relay_down_pin", cfg->relay_down_pin);
-    cfg->relays_active_high = config_get_bool_or_default("relays_active_high", cfg->relays_active_high);
+    cfg->relays_active_high = config_get_bool_or_default("relay_act_high", cfg->relays_active_high);
     cfg->enabled = config_get_bool_or_default("enabled", cfg->enabled);
-    cfg->default_chain_seconds = config_get_float_or_default("default_chain_seconds", cfg->default_chain_seconds);
+    cfg->default_chain_seconds = config_get_float_or_default("def_chain_sec", cfg->default_chain_seconds);
     cfg->neutral_ms = config_get_int_or_default("neutral_ms", cfg->neutral_ms);
     cfg->status_led_pin = config_get_int_or_default("status_led_pin", cfg->status_led_pin);
-    cfg->status_led_active_high = config_get_bool_or_default("status_led_active_high", cfg->status_led_active_high);
+    cfg->status_led_active_high = config_get_bool_or_default("led_act_high", cfg->status_led_active_high);
 
-    cfg->chain_sensor_pin = config_get_int_or_default("chain_sensor_pin", cfg->chain_sensor_pin);
-    cfg->chain_sensor_pullup = config_get_bool_or_default("chain_sensor_pullup", cfg->chain_sensor_pullup);
-    cfg->chain_calibration = config_get_float_or_default("chain_calibration", cfg->chain_calibration);
-    cfg->pulse_debounce_ms = config_get_int_or_default("pulse_debounce_ms", cfg->pulse_debounce_ms);
+    cfg->chain_sensor_pin = config_get_int_or_default("chain_sen_pin", cfg->chain_sensor_pin);
+    cfg->chain_sensor_pullup = config_get_bool_or_default("chain_pullup", cfg->chain_sensor_pullup);
+    cfg->chain_calibration = config_get_float_or_default("chain_cal", cfg->chain_calibration);
+    cfg->pulse_debounce_ms = config_get_int_or_default("pulse_dbnc_ms", cfg->pulse_debounce_ms);
 
     cfg->ext_up_gpio = config_get_int_or_default("ext_up_gpio", cfg->ext_up_gpio);
     cfg->ext_down_gpio = config_get_int_or_default("ext_down_gpio", cfg->ext_down_gpio);
-    cfg->ext_input_active_high = config_get_bool_or_default("ext_input_active_high", cfg->ext_input_active_high);
-    cfg->ext_input_debounce_ms = config_get_int_or_default("ext_input_debounce_ms", cfg->ext_input_debounce_ms);
+    cfg->ext_input_active_high = config_get_bool_or_default("ext_act_high", cfg->ext_input_active_high);
+    cfg->ext_input_debounce_ms = config_get_int_or_default("ext_dbnc_ms", cfg->ext_input_debounce_ms);
 
-    cfg->base_threshold_m = config_get_float_or_default("base_threshold_m", cfg->base_threshold_m);
+    cfg->base_threshold_m = config_get_float_or_default("base_thresh_m", cfg->base_threshold_m);
     cfg->step_m = config_get_float_or_default("step_m", cfg->step_m);
     cfg->base_beeps = config_get_int_or_default("base_beeps", cfg->base_beeps);
     cfg->beeps_per_step = config_get_int_or_default("beeps_per_step", cfg->beeps_per_step);
 
     char dir_buf[16] = {0};
-    config_get_string_or_default("beep_on_direction", dir_buf, sizeof(dir_buf),
+    config_get_string_or_default("beep_on_dir", dir_buf, sizeof(dir_buf),
                                  beep_dir_to_string(cfg->beep_on_direction));
     cfg->beep_on_direction = parse_beep_dir(dir_buf);
 }

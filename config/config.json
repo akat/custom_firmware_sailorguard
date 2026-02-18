@@ -23,7 +23,7 @@
           "max": 39
         },
         {
-          "key": "relays_active_high",
+          "key": "relay_act_high",
           "label": "Relays Active HIGH",
           "type": "bool",
           "default": true
@@ -35,7 +35,7 @@
           "default": true
         },
         {
-          "key": "default_chain_seconds",
+          "key": "def_chain_sec",
           "label": "Default Seconds",
           "type": "number",
           "default": 5,
@@ -61,7 +61,7 @@
           "help": "Onboard status LED pin (-1 to disable)."
         },
         {
-          "key": "status_led_active_high",
+          "key": "led_act_high",
           "label": "Status LED Active HIGH",
           "type": "bool",
           "default": true
@@ -73,7 +73,7 @@
       "description": "Chain sensor and calibration.",
       "fields": [
         {
-          "key": "chain_sensor_pin",
+          "key": "chain_sen_pin",
           "label": "Chain Sensor GPIO",
           "type": "gpio",
           "default": 25,
@@ -81,13 +81,13 @@
           "max": 39
         },
         {
-          "key": "chain_sensor_pullup",
+          "key": "chain_pullup",
           "label": "Enable Internal Pull-up",
           "type": "bool",
           "default": true
         },
         {
-          "key": "chain_calibration",
+          "key": "chain_cal",
           "label": "Meters per Pulse",
           "type": "number",
           "default": 1,
@@ -95,7 +95,7 @@
           "max": 10
         },
         {
-          "key": "pulse_debounce_ms",
+          "key": "pulse_dbnc_ms",
           "label": "Pulse Debounce (ms)",
           "type": "number",
           "default": 150,
@@ -127,14 +127,14 @@
           "help": "Input from windlass DOWN relay (-1 to disable)."
         },
         {
-          "key": "ext_input_active_high",
+          "key": "ext_act_high",
           "label": "External Input Active High",
           "type": "bool",
           "default": false,
           "help": "false = Active LOW with pull-up (relay closed = LOW)."
         },
         {
-          "key": "ext_input_debounce_ms",
+          "key": "ext_dbnc_ms",
           "label": "External Input Debounce (ms)",
           "type": "number",
           "default": 50,
@@ -148,7 +148,7 @@
       "description": "Buzzer threshold behavior.",
       "fields": [
         {
-          "key": "base_threshold_m",
+          "key": "base_thresh_m",
           "label": "Base Threshold (m)",
           "type": "number",
           "default": 20,
@@ -180,7 +180,7 @@
           "max": 5
         },
         {
-          "key": "beep_on_direction",
+          "key": "beep_on_dir",
           "label": "Beep On Direction",
           "type": "select",
           "default": "DOWN",

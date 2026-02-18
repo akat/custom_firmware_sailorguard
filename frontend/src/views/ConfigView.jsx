@@ -77,7 +77,7 @@ export default function ConfigView({
           value={value ?? ""}
           min={field.min}
           max={field.max}
-          step={inputType === "number" ? "1" : undefined}
+          step={field.step ?? (inputType === "number" ? "any" : undefined)}
           onInput={(event) =>
             onChange(
               field.key,
