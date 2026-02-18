@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_http_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -910,11 +911,8 @@ esp_err_t signalk_get_status(signalk_status_t *status) {
     return ESP_OK;
 }
 
-static esp_err_t signalk_send_ws_data(const signalk_data_t *data) {
-    if (!g_signalk_state.ws_connected) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
+// Build SignalK delta JSON payload from data. Caller must free() the returned string.
+static char *signalk_build_delta_json(const signalk_data_t *data) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "context", "vessels.self");
 
@@ -971,7 +969,15 @@ static esp_err_t signalk_send_ws_data(const signalk_data_t *data) {
 
     char *payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
+    return payload;
+}
 
+static esp_err_t signalk_send_ws_data(const signalk_data_t *data) {
+    if (!g_signalk_state.ws_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char *payload = signalk_build_delta_json(data);
     if (!payload) {
         return ESP_ERR_NO_MEM;
     }
@@ -981,11 +987,74 @@ static esp_err_t signalk_send_ws_data(const signalk_data_t *data) {
     free(payload);
 
     if (sent < 0) {
-        ESP_LOGE(TAG, "Failed to send delta");
+        ESP_LOGE(TAG, "Failed to send delta via WS");
         return ESP_FAIL;
     }
 
     return ESP_OK;
+}
+
+static esp_err_t http_delta_event_handler(esp_http_client_event_t *evt) {
+    // We don't need the response body, just discard it
+    (void)evt;
+    return ESP_OK;
+}
+
+static esp_err_t signalk_send_http_delta(const signalk_data_t *data) {
+    if (g_signalk_state.config.hostname[0] == '\0') {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char *payload = signalk_build_delta_json(data);
+    if (!payload) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    char url[256];
+    const char *scheme = g_signalk_state.config.use_ssl ? "https" : "http";
+    snprintf(url, sizeof(url), "%s://%s:%d/signalk/v1/api/",
+             scheme,
+             g_signalk_state.config.hostname,
+             g_signalk_state.config.port);
+
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .event_handler = http_delta_event_handler,
+        .timeout_ms = 3000,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        free(payload);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+
+    if (g_signalk_state.config.token[0] != '\0') {
+        char auth_header[560];
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s",
+                 g_signalk_state.config.token);
+        esp_http_client_set_header(client, "Authorization", auth_header);
+    }
+
+    esp_http_client_set_post_field(client, payload, (int)strlen(payload));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        if (status < 200 || status >= 300) {
+            ESP_LOGW(TAG, "HTTP delta POST returned %d", status);
+            err = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGW(TAG, "HTTP delta POST failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    free(payload);
+    return err;
 }
 
 esp_err_t signalk_send_data(const signalk_data_t *data) {
@@ -997,18 +1066,23 @@ esp_err_t signalk_send_data(const signalk_data_t *data) {
     // without needing to subscribe and receive echoes from the server
     signalk_update_cache(data, SIGNALK_SOURCE_WS);
 
-    bool ws_ok = false;
+    // Try WebSocket first (lowest latency, bidirectional)
     if (signalk_ws_enabled(&g_signalk_state.config)) {
         if (signalk_send_ws_data(data) == ESP_OK) {
-            ws_ok = true;
+            g_signalk_state.status.messages_sent++;
+            return ESP_OK;
         }
     }
 
-    if (ws_ok) {
-        g_signalk_state.status.messages_sent++;
-        return ESP_OK;
+    // Fallback: send via HTTP POST (reliable, works with UDP-only or WS fallback)
+    if (g_signalk_state.config.hostname[0] != '\0') {
+        if (signalk_send_http_delta(data) == ESP_OK) {
+            g_signalk_state.status.messages_sent++;
+            return ESP_OK;
+        }
     }
 
+    // Last resort: send via UDP broadcast
     if (signalk_udp_enabled(&g_signalk_state.config) && signalk_udp_is_running()) {
         esp_err_t err = signalk_udp_send(data);
         if (err == ESP_OK) {
