@@ -327,8 +327,8 @@ esp_err_t wifi_manager_scan(wifi_ap_record_t *records, uint16_t *count) {
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
         .scan_time = {
             .active = {
-                .min = 500,
-                .max = 5000,
+                .min = 100,
+                .max = 800,   /* was 5000ms — that blocked the HTTP server task for 5s */
             },
         },
     };

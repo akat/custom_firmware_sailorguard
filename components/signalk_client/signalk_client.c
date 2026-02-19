@@ -128,6 +128,7 @@ static struct {
 
     // WebSocket watchdog
     int ws_consecutive_failures;
+    bool ws_stopping;   /* true while explicitly tearing down WS — ignore DISCONNECTED/ERROR */
 } g_signalk_state = {
     .initialized = false,
     .client_task = NULL,
@@ -168,9 +169,11 @@ static void signalk_ws_reset_reconnect(void) {
 
 static void signalk_ws_stop(void) {
     if (g_signalk_state.ws_client) {
+        g_signalk_state.ws_stopping = true;   /* suppress spurious DISCONNECTED/ERROR events */
         esp_websocket_client_stop(g_signalk_state.ws_client);
         esp_websocket_client_destroy(g_signalk_state.ws_client);
         g_signalk_state.ws_client = NULL;
+        g_signalk_state.ws_stopping = false;
     }
     g_signalk_state.ws_connected = false;
     g_signalk_state.hello_received = false;
@@ -418,7 +421,8 @@ static void signalk_ws_event_handler(void *handler_args,
 
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         g_signalk_state.ws_connected = true;
-        g_signalk_state.ws_consecutive_failures = 0;  // Reset watchdog
+        g_signalk_state.ws_consecutive_failures = 0;  /* reset watchdog on clean connect */
+        signalk_ws_reset_reconnect();                 /* reset backoff delay for next reconnect */
         g_signalk_state.hello_received = false;
         g_signalk_state.subscriptions_sent = false;
         g_signalk_state.status.state = SIGNALK_STATE_CONNECTED;
@@ -434,6 +438,10 @@ static void signalk_ws_event_handler(void *handler_args,
     }
 
     if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
+        /* Ignore events fired during intentional client teardown */
+        if (g_signalk_state.ws_stopping) {
+            return;
+        }
         g_signalk_state.ws_connected = false;
         g_signalk_state.hello_received = false;
         g_signalk_state.subscriptions_sent = false;
@@ -491,6 +499,10 @@ static void signalk_ws_event_handler(void *handler_args,
     }
 
     if (event_id == WEBSOCKET_EVENT_ERROR) {
+        /* Ignore events fired during intentional client teardown */
+        if (g_signalk_state.ws_stopping) {
+            return;
+        }
         g_signalk_state.ws_connected = false;
         g_signalk_state.ws_consecutive_failures++;
         g_signalk_state.status.state = SIGNALK_STATE_ERROR;
@@ -531,10 +543,10 @@ static esp_err_t signalk_ws_start(void) {
     esp_websocket_client_config_t cfg = {
         .uri = g_signalk_state.ws_url,
         .headers = g_signalk_state.ws_headers,
-        .buffer_size = 2048,
+        .buffer_size = 4096,
         .disable_auto_reconnect = true,
-        .ping_interval_sec = 15,
-        .pingpong_timeout_sec = 30,
+        .ping_interval_sec = 20,
+        .pingpong_timeout_sec = 60,
     };
 
     g_signalk_state.ws_client = esp_websocket_client_init(&cfg);
@@ -705,7 +717,10 @@ static void signalk_client_task(void *pvParameters) {
                                      WS_MAX_CONSECUTIVE_FAILURES);
                             signalk_ws_schedule_reconnect(now_ms);
                         } else {
-                            signalk_ws_reset_reconnect();
+                            /* Connection attempt started asynchronously — guard against
+                             * re-entering signalk_ws_start() before CONNECTED/ERROR fires.
+                             * WEBSOCKET_EVENT_CONNECTED will call signalk_ws_reset_reconnect(). */
+                            g_signalk_state.next_reconnect_ms = now_ms + 15000;
                         }
                     }
                 }
