@@ -313,22 +313,16 @@ esp_err_t wifi_manager_scan(wifi_ap_record_t *records, uint16_t *count) {
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 
-    uint8_t primary = 0;
-    wifi_second_chan_t secondary = WIFI_SECOND_CHAN_NONE;
-    if (s_ap_started) {
-        esp_wifi_get_channel(&primary, &secondary);
-    }
-
     wifi_scan_config_t scan_config = {
         .ssid = NULL,
         .bssid = NULL,
-        .channel = s_ap_started ? primary : 0,
+        .channel = 0,   /* 0 = all channels; restricting to AP channel missed networks on ch1/11 */
         .show_hidden = true,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
         .scan_time = {
             .active = {
                 .min = 100,
-                .max = 800,   /* was 5000ms — that blocked the HTTP server task for 5s */
+                .max = 800,
             },
         },
     };

@@ -545,7 +545,7 @@ static esp_err_t signalk_ws_start(void) {
         .headers = g_signalk_state.ws_headers,
         .buffer_size = 4096,
         .disable_auto_reconnect = true,
-        .ping_interval_sec = 20,
+        .ping_interval_sec = 10,   /* server drops idle connections at ~15s — ping before that */
         .pingpong_timeout_sec = 60,
     };
 

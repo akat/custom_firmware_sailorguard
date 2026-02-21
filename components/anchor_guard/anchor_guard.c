@@ -975,7 +975,7 @@ static void anchor_tick(void) {
     check_auto_save();
 
     uint32_t now = now_ms();
-    if (now - g_rt.last_heartbeat_ms >= 15000) {
+    if (now - g_rt.last_heartbeat_ms >= 10000) {
         g_rt.last_heartbeat_ms = now;
         send_heartbeat();
     }
