@@ -957,6 +957,12 @@ static void anchor_tick(void) {
     run_state_t eff_state = effective_run_state();
     if (eff_state == RUN_DOWN) direction = 1;
     else if (eff_state == RUN_UP) direction = -1;
+    else if (g_rt.state == RUN_IDLE && g_external.state == EXT_NONE) {
+        /* SK idle + external NONE: DOWN would have set IO17 LOW and been detected.
+         * A pulse here can only mean UP movement (hardware diode blocks IO16 for UP).
+         * If motor is truly idle there are no pulses, so this inference is safe. */
+        direction = -1;
+    }
 
     bool pulsed = chain_update(direction);
     if (pulsed) {
