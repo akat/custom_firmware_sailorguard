@@ -141,6 +141,7 @@ typedef struct {
     anchor_cmd_type_t type;
     char str[32];
     float value;
+    uint32_t enqueued_ms;  /* timestamp when queued — stale commands are discarded */
 } anchor_cmd_t;
 
 static anchor_config_t g_cfg;
@@ -992,8 +993,14 @@ static void anchor_task(void *arg) {
     while (1) {
         esp_task_wdt_reset();
 
-        while (xQueueReceive(g_cmd_queue, &cmd, 0) == pdTRUE) {
-            if (should_process_signalk()) {
+        if (should_process_signalk()) {
+            while (xQueueReceive(g_cmd_queue, &cmd, 0) == pdTRUE) {
+                uint32_t age_ms = now_ms() - cmd.enqueued_ms;
+                if (age_ms > 15000) {
+                    ESP_LOGW(TAG, "Discarding stale command '%s' (age=%lums)",
+                             cmd.str, (unsigned long)age_ms);
+                    continue;
+                }
                 handle_command(&cmd);
             }
         }
@@ -1069,6 +1076,7 @@ static void signalk_cb(const signalk_data_t *data, void *user_ctx) {
     }
 
     if (g_cmd_queue) {
+        cmd.enqueued_ms = (uint32_t)((uint64_t)xTaskGetTickCount() * portTICK_PERIOD_MS);
         if (xQueueSend(g_cmd_queue, &cmd, 0) != pdTRUE) {
             ESP_LOGW(TAG, "Command queue full, dropping command for path: %s", data->path);
         }

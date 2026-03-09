@@ -150,12 +150,14 @@ static int64_t signalk_now_ms(void) {
 }
 
 static void signalk_ws_schedule_reconnect(int64_t now_ms) {
+    /* Safety-critical system: reconnect fast. Cap at 5s (was 30s).
+     * Fast detection + fast reconnect = minimal command outage window. */
     if (g_signalk_state.reconnect_delay_ms <= 0) {
-        g_signalk_state.reconnect_delay_ms = 2000;
-    } else if (g_signalk_state.reconnect_delay_ms < 30000) {
+        g_signalk_state.reconnect_delay_ms = 1000;
+    } else {
         g_signalk_state.reconnect_delay_ms *= 2;
-        if (g_signalk_state.reconnect_delay_ms > 30000) {
-            g_signalk_state.reconnect_delay_ms = 30000;
+        if (g_signalk_state.reconnect_delay_ms > 5000) {
+            g_signalk_state.reconnect_delay_ms = 5000;
         }
     }
 
@@ -163,7 +165,7 @@ static void signalk_ws_schedule_reconnect(int64_t now_ms) {
 }
 
 static void signalk_ws_reset_reconnect(void) {
-    g_signalk_state.reconnect_delay_ms = 2000;
+    g_signalk_state.reconnect_delay_ms = 1000;  /* first retry after 1s */
     g_signalk_state.next_reconnect_ms = 0;
 }
 
@@ -541,12 +543,20 @@ static esp_err_t signalk_ws_start(void) {
     }
 
     esp_websocket_client_config_t cfg = {
-        .uri = g_signalk_state.ws_url,
-        .headers = g_signalk_state.ws_headers,
-        .buffer_size = 4096,
+        .uri                  = g_signalk_state.ws_url,
+        .headers              = g_signalk_state.ws_headers,
+        .buffer_size          = 4096,
         .disable_auto_reconnect = true,
-        .ping_interval_sec = 10,   /* server drops idle connections at ~15s — ping before that */
-        .pingpong_timeout_sec = 60,
+        /* WS-level ping: keeps the SignalK server from timing out idle connections */
+        .ping_interval_sec    = 10,
+        /* Declare connection dead if no pong within 20s (was 60s) */
+        .pingpong_timeout_sec = 20,
+        /* TCP keepalive: detect dead connections (NAT drop, WiFi hiccup) at TCP layer.
+         * After 5s idle → probe every 3s × 3 attempts = dead declared in ~14s total. */
+        .keep_alive_enable    = true,
+        .keep_alive_idle      = 5,
+        .keep_alive_interval  = 3,
+        .keep_alive_count     = 3,
     };
 
     g_signalk_state.ws_client = esp_websocket_client_init(&cfg);
@@ -720,7 +730,7 @@ static void signalk_client_task(void *pvParameters) {
                             /* Connection attempt started asynchronously — guard against
                              * re-entering signalk_ws_start() before CONNECTED/ERROR fires.
                              * WEBSOCKET_EVENT_CONNECTED will call signalk_ws_reset_reconnect(). */
-                            g_signalk_state.next_reconnect_ms = now_ms + 15000;
+                            g_signalk_state.next_reconnect_ms = now_ms + 6000;
                         }
                     }
                 }
