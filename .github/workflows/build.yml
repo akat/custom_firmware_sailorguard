@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - 'version_*'
 
 jobs:
   build:
@@ -14,6 +15,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Derive project version from tag
+        run: |
+          REF="${GITHUB_REF_NAME}"
+          VER="${REF#v}"
+          VER="${VER#V}"
+          VER="${VER#version_}"
+          VER="${VER#VERSION_}"
+          echo "PROJECT_VER=${VER}" >> "$GITHUB_ENV"
+          echo "Using PROJECT_VER=${VER}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

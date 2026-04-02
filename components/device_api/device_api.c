@@ -90,16 +90,29 @@ static esp_err_t nvs_set_auto_update(bool enabled) {
 // Version comparison
 // ============================================================================
 
+static void parse_version_triplet(const char *src, int *major, int *minor, int *patch) {
+    *major = 0;
+    *minor = 0;
+    *patch = 0;
+
+    if (!src) {
+        return;
+    }
+
+    // Accept tags like "v1.2.3", "version_1.2.3", or "release-1.2.3".
+    while (*src && (*src < '0' || *src > '9')) {
+        src++;
+    }
+
+    sscanf(src, "%d.%d.%d", major, minor, patch);
+}
+
 static int compare_versions(const char *current, const char *latest) {
     int c_major = 0, c_minor = 0, c_patch = 0;
     int l_major = 0, l_minor = 0, l_patch = 0;
 
-    // Skip leading 'v' if present
-    if (current[0] == 'v' || current[0] == 'V') current++;
-    if (latest[0] == 'v' || latest[0] == 'V') latest++;
-
-    sscanf(current, "%d.%d.%d", &c_major, &c_minor, &c_patch);
-    sscanf(latest, "%d.%d.%d", &l_major, &l_minor, &l_patch);
+    parse_version_triplet(current, &c_major, &c_minor, &c_patch);
+    parse_version_triplet(latest, &l_major, &l_minor, &l_patch);
 
     if (l_major != c_major) return l_major - c_major;
     if (l_minor != c_minor) return l_minor - c_minor;
@@ -284,6 +297,9 @@ typedef struct {
 static volatile bool ota_in_progress = false;
 
 #define SPIFFS_OTA_CHUNK_SIZE 4096
+#define OTA_HTTP_BUFFER_SIZE 16384
+#define OTA_HTTP_BUFFER_TX_SIZE 2048
+#define OTA_REDIRECT_LIMIT 6
 
 static esp_err_t spiffs_ota_write(const char *url) {
     const esp_partition_t *spiffs_part = esp_partition_find_first(
@@ -299,10 +315,17 @@ static esp_err_t spiffs_ota_write(const char *url) {
         .url = url,
         .timeout_ms = 60000,
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = OTA_HTTP_BUFFER_SIZE,
+        .buffer_size_tx = OTA_HTTP_BUFFER_TX_SIZE,
+        .max_redirection_count = OTA_REDIRECT_LIMIT,
+        .disable_auto_redirect = true,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) return ESP_ERR_NO_MEM;
+
+    esp_http_client_set_header(client, "User-Agent", "ESP32-SailorGuard");
+    esp_http_client_set_header(client, "Accept", "application/octet-stream");
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
@@ -313,6 +336,31 @@ static esp_err_t spiffs_ota_write(const char *url) {
 
     int content_length = esp_http_client_fetch_headers(client);
     int status_code = esp_http_client_get_status_code(client);
+
+    for (int i = 0; i < OTA_REDIRECT_LIMIT && status_code >= 300 && status_code < 400; i++) {
+        char next_url[256] = {0};
+        esp_http_client_get_url(client, next_url, (int)sizeof(next_url));
+        ESP_LOGI(TAG, "SPIFFS redirect %d -> %s", status_code, next_url);
+
+        err = esp_http_client_set_redirection(client);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS redirect handling failed: %s", esp_err_to_name(err));
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return err;
+        }
+
+        esp_http_client_close(client);
+        err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS HTTP reopen failed: %s", esp_err_to_name(err));
+            esp_http_client_cleanup(client);
+            return err;
+        }
+
+        content_length = esp_http_client_fetch_headers(client);
+        status_code = esp_http_client_get_status_code(client);
+    }
 
     if (status_code != 200) {
         ESP_LOGE(TAG, "SPIFFS HTTP status: %d", status_code);
@@ -404,6 +452,10 @@ static void ota_task(void *arg) {
             .url = params->firmware_url,
             .timeout_ms = 60000,
             .crt_bundle_attach = esp_crt_bundle_attach,
+            .buffer_size = OTA_HTTP_BUFFER_SIZE,
+            .buffer_size_tx = OTA_HTTP_BUFFER_TX_SIZE,
+            .max_redirection_count = OTA_REDIRECT_LIMIT,
+            .user_agent = "ESP32-SailorGuard",
         };
 
         esp_https_ota_config_t ota_config = {
@@ -489,7 +541,7 @@ static esp_err_t device_ota_handler(httpd_req_t *req) {
     cJSON_Delete(body);
 
     ota_in_progress = true;
-    if (xTaskCreate(ota_task, "ota", 8192, params, 5, NULL) != pdPASS) {
+    if (xTaskCreate(ota_task, "ota", 12288, params, 5, NULL) != pdPASS) {
         free(params);
         ota_in_progress = false;
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "task create failed");

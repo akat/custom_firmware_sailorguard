@@ -6,6 +6,8 @@ export default function DeviceView() {
   const [autoUpdate, setAutoUpdate] = useState(false);
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [otaStage, setOtaStage] = useState("");
+  const [otaProgress, setOtaProgress] = useState(0);
   const [rebooting, setRebooting] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -26,6 +28,65 @@ export default function DeviceView() {
     } catch (err) {
       console.error("Failed to load device info:", err);
     }
+  };
+
+  const parseVersion = (value) => {
+    const match = String(value || "").match(/(\d+)\.(\d+)\.(\d+)/);
+    if (!match) return [0, 0, 0];
+    return [Number(match[1]), Number(match[2]), Number(match[3])];
+  };
+
+  const isVersionAtLeast = (current, expected) => {
+    const c = parseVersion(current);
+    const e = parseVersion(expected);
+    if (c[0] !== e[0]) return c[0] > e[0];
+    if (c[1] !== e[1]) return c[1] > e[1];
+    return c[2] >= e[2];
+  };
+
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const monitorOtaCompletion = async (expectedVersion, needsFirmwareVersionCheck) => {
+    const timeoutAt = Date.now() + 180000; // 3 minutes
+    let sawOffline = false;
+
+    setOtaStage("Waiting for reboot...");
+    setOtaProgress(80);
+
+    while (Date.now() < timeoutAt) {
+      try {
+        const response = await fetch("/api/device/info", { cache: "no-store" });
+        if (!response.ok) {
+          sawOffline = true;
+          await wait(2500);
+          continue;
+        }
+
+        const data = await response.json();
+        setInfo(data);
+
+        const firmwareReady = !needsFirmwareVersionCheck ||
+          isVersionAtLeast(data.firmware_version, expectedVersion);
+
+        if (firmwareReady && (sawOffline || needsFirmwareVersionCheck)) {
+          setOtaProgress(100);
+          setOtaStage("Update completed");
+          setUpdating(false);
+          setMessage(`OTA finished. Running firmware ${data.firmware_version}.`);
+          await checkForUpdates();
+          return;
+        }
+      } catch (err) {
+        sawOffline = true;
+      }
+
+      await wait(2500);
+    }
+
+    setUpdating(false);
+    setOtaProgress(0);
+    setOtaStage("");
+    setError("OTA started, but confirmation timed out. Refresh and verify device version.");
   };
 
   const loadAutoUpdate = async () => {
@@ -64,32 +125,30 @@ export default function DeviceView() {
     }
   };
 
-  const startOta = async (type) => {
+  const startOta = async () => {
     if (!updateInfo) return;
 
     const hasFw = updateInfo.firmware_url && updateInfo.firmware_url.length > 0;
     const hasSp = updateInfo.spiffs_url && updateInfo.spiffs_url.length > 0;
 
-    let label, body;
-    if (type === "all") {
-      if (!hasFw && !hasSp) { setError("No download URLs available"); return; }
-      label = "firmware and UI";
-      body = { firmware_url: updateInfo.firmware_url, spiffs_url: updateInfo.spiffs_url };
-    } else if (type === "firmware") {
-      if (!hasFw) { setError("No firmware URL available"); return; }
-      label = "firmware";
-      body = { firmware_url: updateInfo.firmware_url };
-    } else {
-      if (!hasSp) { setError("No UI image URL available"); return; }
-      label = "UI";
-      body = { spiffs_url: updateInfo.spiffs_url };
+    if (!hasFw && !hasSp) {
+      setError("No download URLs available");
+      return;
     }
+
+    const label = "firmware and UI";
+    const body = {
+      firmware_url: updateInfo.firmware_url,
+      spiffs_url: updateInfo.spiffs_url,
+    };
 
     if (!confirm(`Update ${label} now? The device will reboot after the update.`)) {
       return;
     }
 
     setUpdating(true);
+    setOtaProgress(10);
+    setOtaStage("Starting OTA request...");
     setError("");
     setMessage(`Downloading and installing ${label}...`);
     try {
@@ -103,10 +162,28 @@ export default function DeviceView() {
         throw new Error(`HTTP ${response.status}`);
       }
 
+      setOtaProgress(35);
+      setOtaStage("Downloading update package...");
       setMessage("OTA update started. Device will reboot when complete...");
+
+      setTimeout(() => {
+        setOtaProgress((prev) => Math.max(prev, 55));
+        setOtaStage("Writing flash...");
+      }, 8000);
+
+      setTimeout(() => {
+        setOtaProgress((prev) => Math.max(prev, 70));
+        setOtaStage("Finalizing and rebooting...");
+      }, 18000);
+
+      const needsFirmwareVersionCheck = Boolean(hasFw);
+      const expectedVersion = updateInfo.latest || "0.0.0";
+      monitorOtaCompletion(expectedVersion, needsFirmwareVersionCheck);
     } catch (err) {
       setError("OTA failed: " + err.message);
       setUpdating(false);
+      setOtaProgress(0);
+      setOtaStage("");
     }
   };
 
@@ -237,28 +314,25 @@ export default function DeviceView() {
           <div class="action-row">
             <button
               class="button primary"
-              onClick={() => startOta("all")}
+              onClick={startOta}
               type="button"
               disabled={updating || (!updateInfo.firmware_url && !updateInfo.spiffs_url)}
             >
-              {updating ? "Updating..." : "Update All"}
+              {updating ? "Updating..." : "Update Firmware + UI"}
             </button>
-            <button
-              class="button secondary"
-              onClick={() => startOta("firmware")}
-              type="button"
-              disabled={updating || !updateInfo.firmware_url}
-            >
-              Firmware Only
-            </button>
-            <button
-              class="button secondary"
-              onClick={() => startOta("spiffs")}
-              type="button"
-              disabled={updating || !updateInfo.spiffs_url}
-            >
-              UI Only
-            </button>
+          </div>
+        )}
+
+        {updating && (
+          <div class="ota-progress" aria-live="polite">
+            <div class="ota-progress-header">
+              <span>OTA Progress</span>
+              <span>{Math.round(otaProgress)}%</span>
+            </div>
+            <div class="ota-progress-track">
+              <div class="ota-progress-bar" style={{ width: `${otaProgress}%` }} />
+            </div>
+            <p class="ota-stage">{otaStage || "Updating..."}</p>
           </div>
         )}
 
