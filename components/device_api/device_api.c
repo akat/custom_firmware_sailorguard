@@ -194,9 +194,24 @@ static esp_err_t device_update_check_handler(httpd_req_t *req) {
     int status_code = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
 
-    if (err != ESP_OK || status_code != 200) {
+    if (err != ESP_OK) {
         free(buf.data);
-        ESP_LOGE(TAG, "GitHub API request failed: err=%d status=%d", err, status_code);
+        ESP_LOGE(TAG, "GitHub API request failed: err=%d", err);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "github api failed");
+    }
+
+    if (status_code == 404) {
+        free(buf.data);
+        ESP_LOGW(TAG, "GitHub API returned 404 - no releases available");
+        const char *payload = "{\"current\":\"unknown\",\"latest\":\"unknown\",\"update_available\":false,"
+                              "\"firmware_url\":\"\",\"spiffs_url\":\"\",\"no_releases\":true}";
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+    }
+
+    if (status_code != 200) {
+        free(buf.data);
+        ESP_LOGE(TAG, "GitHub API request failed: status=%d", status_code);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "github api failed");
     }
 
