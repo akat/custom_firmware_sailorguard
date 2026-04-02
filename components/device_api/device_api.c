@@ -28,7 +28,7 @@ static const char *TAG = "device_api";
 static const char *NVS_NAMESPACE = "device";
 static const char *NVS_AUTO_UPDATE = "auto_update";
 static const char *GITHUB_API_URL =
-    "https://api.github.com/repos/akatsaris/custom_firmware_sailorguard/releases/latest";
+    "https://api.github.com/repos/akat/custom_firmware_sailorguard/releases/latest";
 
 // ============================================================================
 // HTTP client helpers (same pattern as signalk_auth.c)
