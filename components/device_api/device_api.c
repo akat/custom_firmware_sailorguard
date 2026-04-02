@@ -268,6 +268,8 @@ typedef struct {
 
 static volatile bool ota_in_progress = false;
 
+#define SPIFFS_OTA_CHUNK_SIZE 4096
+
 static esp_err_t spiffs_ota_write(const char *url) {
     const esp_partition_t *spiffs_part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, NULL);
@@ -276,67 +278,105 @@ static esp_err_t spiffs_ota_write(const char *url) {
         return ESP_ERR_NOT_FOUND;
     }
 
-    ESP_LOGI(TAG, "SPIFFS OTA: downloading from %s", url);
-    ESP_LOGI(TAG, "SPIFFS partition: offset=0x%lx size=0x%lx", spiffs_part->address, spiffs_part->size);
+    ESP_LOGI(TAG, "SPIFFS OTA: streaming from %s", url);
 
-    http_buf_t buf = {0};
     esp_http_client_config_t cfg = {
         .url = url,
-        .event_handler = http_event_handler,
-        .user_data = &buf,
-        .timeout_ms = 30000,
+        .timeout_ms = 60000,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) {
-        return ESP_ERR_NO_MEM;
+    if (!client) return ESP_ERR_NO_MEM;
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SPIFFS HTTP open failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return err;
     }
 
-    esp_err_t err = esp_http_client_perform(client);
+    int content_length = esp_http_client_fetch_headers(client);
     int status_code = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
 
-    if (err != ESP_OK || status_code != 200) {
-        free(buf.data);
-        ESP_LOGE(TAG, "SPIFFS download failed: err=%d status=%d", err, status_code);
+    if (status_code != 200) {
+        ESP_LOGE(TAG, "SPIFFS HTTP status: %d", status_code);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
         return ESP_FAIL;
     }
 
-    if (buf.size == 0 || buf.size > spiffs_part->size) {
-        ESP_LOGE(TAG, "SPIFFS image invalid: size=%u partition=%lu", (unsigned)buf.size, spiffs_part->size);
-        free(buf.data);
+    if (content_length > 0 && (size_t)content_length > spiffs_part->size) {
+        ESP_LOGE(TAG, "SPIFFS image too large: %d > %"PRIu32, content_length, spiffs_part->size);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
         return ESP_ERR_INVALID_SIZE;
     }
 
-    ESP_LOGI(TAG, "SPIFFS image downloaded: %u bytes, erasing partition...", (unsigned)buf.size);
+    uint8_t *chunk = malloc(SPIFFS_OTA_CHUNK_SIZE);
+    if (!chunk) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "Erasing SPIFFS partition...");
     err = esp_partition_erase_range(spiffs_part, 0, spiffs_part->size);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "SPIFFS erase failed: %s", esp_err_to_name(err));
-        free(buf.data);
+        free(chunk);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
         return err;
     }
 
-    ESP_LOGI(TAG, "Writing SPIFFS image...");
-    err = esp_partition_write(spiffs_part, 0, buf.data, buf.size);
-    free(buf.data);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SPIFFS write failed: %s", esp_err_to_name(err));
-        return err;
+    size_t written = 0;
+    int read_len;
+
+    while ((read_len = esp_http_client_read(client, (char *)chunk, SPIFFS_OTA_CHUNK_SIZE)) > 0) {
+        if (written + (size_t)read_len > spiffs_part->size) {
+            ESP_LOGE(TAG, "SPIFFS image exceeds partition size");
+            err = ESP_ERR_INVALID_SIZE;
+            break;
+        }
+        // Flash writes must be 4-byte aligned in size; pad last chunk with 0xFF
+        size_t write_len = ((size_t)read_len + 3u) & ~3u;
+        if (write_len > (size_t)read_len) {
+            memset(chunk + read_len, 0xFF, write_len - (size_t)read_len);
+        }
+        err = esp_partition_write(spiffs_part, written, chunk, write_len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS write failed at offset %u: %s", (unsigned)written, esp_err_to_name(err));
+            break;
+        }
+        written += (size_t)read_len;
     }
 
-    ESP_LOGI(TAG, "SPIFFS OTA completed successfully");
-    return ESP_OK;
+    if (err == ESP_OK && read_len < 0) {
+        ESP_LOGE(TAG, "SPIFFS HTTP read error: %d", read_len);
+        err = ESP_FAIL;
+    }
+
+    free(chunk);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "SPIFFS OTA completed: %u bytes written", (unsigned)written);
+    }
+    return err;
 }
 
 static void ota_task(void *arg) {
     ota_task_params_t *params = (ota_task_params_t *)arg;
+    bool spiffs_ok = true;
 
     // Step 1: Update SPIFFS if URL provided (do this first, before app OTA)
     if (params->spiffs_url[0] != '\0') {
         esp_err_t err = spiffs_ota_write(params->spiffs_url);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "SPIFFS OTA failed: %s", esp_err_to_name(err));
+            spiffs_ok = false;
             // Continue with firmware update anyway
         }
     }
@@ -347,7 +387,7 @@ static void ota_task(void *arg) {
 
         esp_http_client_config_t cfg = {
             .url = params->firmware_url,
-            .timeout_ms = 30000,
+            .timeout_ms = 60000,
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
 
@@ -364,12 +404,14 @@ static void ota_task(void *arg) {
         } else {
             ESP_LOGE(TAG, "Firmware OTA failed: %s", esp_err_to_name(err));
         }
-    } else if (params->spiffs_url[0] != '\0') {
-        // SPIFFS-only update, reboot to remount
-        ESP_LOGI(TAG, "SPIFFS updated, rebooting...");
+    } else if (params->spiffs_url[0] != '\0' && spiffs_ok) {
+        // SPIFFS-only update succeeded, reboot to remount
+        ESP_LOGI(TAG, "SPIFFS updated successfully, rebooting...");
         free(params);
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_restart();
+    } else if (!spiffs_ok) {
+        ESP_LOGE(TAG, "OTA aborted: SPIFFS update failed, not rebooting");
     }
 
     free(params);
