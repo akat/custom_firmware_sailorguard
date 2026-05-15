@@ -70,7 +70,6 @@
           "label": "Pulse Debounce (ms)",
           "type": "number",
           "default": 150,
-          "min": 50,
           "max": 1000
         }
       ]
