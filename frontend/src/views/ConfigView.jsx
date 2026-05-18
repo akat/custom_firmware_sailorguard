@@ -1,3 +1,46 @@
+import { useEffect, useState } from "preact/hooks";
+
+function NumberField({ id, value, min, max, step, placeholder, onChange }) {
+  const toDisplay = (v) =>
+    v === null || v === undefined || Number.isNaN(v) ? "" : String(v);
+  const [text, setText] = useState(toDisplay(value));
+
+  useEffect(() => {
+    const parsed = text === "" ? NaN : Number(text);
+    if (Number.isFinite(parsed) && parsed === value) {
+      return;
+    }
+    setText(toDisplay(value));
+  }, [value]);
+
+  const handleInput = (event) => {
+    const raw = event.target.value.replace(",", ".");
+    setText(raw);
+    if (raw === "" || raw === "-" || raw.endsWith(".")) {
+      return;
+    }
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) {
+      onChange(parsed);
+    }
+  };
+
+  return (
+    <input
+      id={id}
+      class="input"
+      type="text"
+      inputMode="decimal"
+      value={text}
+      min={min}
+      max={max}
+      step={step}
+      onInput={handleInput}
+      placeholder={placeholder || ""}
+    />
+  );
+}
+
 export default function ConfigView({
   schema,
   values,
@@ -65,7 +108,25 @@ export default function ConfigView({
       );
     }
 
-    const inputType = type === "number" || type === "gpio" ? "number" : "text";
+    const isNumeric = type === "number" || type === "gpio";
+
+    if (isNumeric) {
+      return (
+        <label class="field" for={inputId} key={field.key}>
+          <span>{field.label || field.key}</span>
+          <NumberField
+            id={inputId}
+            value={value}
+            min={field.min}
+            max={field.max}
+            step={field.step ?? "any"}
+            placeholder={field.placeholder}
+            onChange={(parsed) => onChange(field.key, parsed)}
+          />
+          {field.help && <p class="field-help">{field.help}</p>}
+        </label>
+      );
+    }
 
     return (
       <label class="field" for={inputId} key={field.key}>
@@ -73,19 +134,9 @@ export default function ConfigView({
         <input
           id={inputId}
           class="input"
-          type={inputType}
+          type="text"
           value={value ?? ""}
-          min={field.min}
-          max={field.max}
-          step={field.step ?? (inputType === "number" ? "any" : undefined)}
-          onInput={(event) =>
-            onChange(
-              field.key,
-              inputType === "number"
-                ? Number(event.target.value)
-                : event.target.value
-            )
-          }
+          onInput={(event) => onChange(field.key, event.target.value)}
           placeholder={field.placeholder || ""}
         />
         {field.help && <p class="field-help">{field.help}</p>}
