@@ -957,6 +957,14 @@ static void anchor_tick(void) {
     run_state_t eff_state = effective_run_state();
     if (eff_state == RUN_DOWN) direction = 1;
     else if (eff_state == RUN_UP) direction = -1;
+    else direction = 1;
+    /*
+     * Fallback: if neither SK nor external sense reports motion but the chain
+     * sensor still produces pulses, assume the windlass is paying out (DOWN).
+     * This covers cases where the boat's manual switch bypasses our sense
+     * inputs (e.g. wiring fault, helm-station override) — we'd rather record
+     * chain going out than miss it.
+     */
 
     bool pulsed = chain_update(direction);
     if (pulsed) {
